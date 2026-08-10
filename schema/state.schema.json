@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jsr.io/@zignado/zig-manager/state.schema.json",
+  "title": "zig-manager generated state v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "source",
+    "activeBuild",
+    "docs"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "source": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/source"
+        }
+      ]
+    },
+    "activeBuild": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/activeBuild"
+        }
+      ]
+    },
+    "docs": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/docs"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "nullableString": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    },
+    "sourceVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "base",
+        "text",
+        "taggedAncestor",
+        "commitsAfterTag",
+        "commitAbbreviation"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "release",
+            "development"
+          ]
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "text": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+        },
+        "taggedAncestor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "commitsAfterTag": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "commitAbbreviation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4,64}$"
+        }
+      }
+    },
+    "gitRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "value"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "tag",
+            "branch",
+            "commit"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selector",
+        "version",
+        "ref",
+        "commit",
+        "repositoryHome",
+        "checkoutPath"
+      ],
+      "properties": {
+        "selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "$ref": "#/$defs/sourceVersion"
+        },
+        "ref": {
+          "$ref": "#/$defs/gitRef"
+        },
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "repositoryHome": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checkoutPath": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "activeBuild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "identity",
+        "manifestPath",
+        "executablePath"
+      ],
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "identity": {
+          "$ref": "#/$defs/hash"
+        },
+        "manifestPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executablePath": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "docs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "manifestPath",
+        "directory",
+        "megaPath"
+      ],
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "manifestPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "directory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "megaPath": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@zignado/zig-manager",
+  "version": "0.0.0",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/mod.ts",
+    "./cli": "./src/cli.ts"
+  },
+  "imports": {
+    "@source-ref/source-ref": "jsr:@source-ref/source-ref@0.0.0",
+    "@std/path/windows": "jsr:@std/path@1.1.4/windows"
+  },
+  "tasks": {
+    "fmt": "deno fmt",
+    "fmt:check": "deno fmt --check",
+    "lint": "deno lint",
+    "typecheck": "deno check src/mod.ts src/cli.ts",
+    "test": "deno test --allow-env --allow-read --allow-write --allow-run tests",
+    "check": "deno task fmt:check && deno task lint && deno task typecheck && deno task test"
+  },
+  "publish": {
+    "include": [
+      "src",
+      "schema",
+      "docs",
+      "README.md",
+      "LICENSE"
+    ]
+  }
+}

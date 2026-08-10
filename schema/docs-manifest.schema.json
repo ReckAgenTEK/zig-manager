@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jsr.io/@zignado/zig-manager/docs-manifest.schema.json",
+  "title": "zig-manager docs manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "source",
+    "compiler",
+    "buildIdentity",
+    "outputPath",
+    "command",
+    "artifacts",
+    "mega"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "compiler": {
+      "$ref": "#/$defs/compiler"
+    },
+    "buildIdentity": {
+      "$ref": "#/$defs/hash"
+    },
+    "outputPath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "command": {
+      "$ref": "#/$defs/command"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    },
+    "mega": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/mega"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "sourceVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "base",
+        "text",
+        "taggedAncestor",
+        "commitsAfterTag",
+        "commitAbbreviation"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "release",
+            "development"
+          ]
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "text": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+        },
+        "taggedAncestor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "commitsAfterTag": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "commitAbbreviation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4,64}$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selector",
+        "version",
+        "commit",
+        "checkoutPath"
+      ],
+      "properties": {
+        "selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "$ref": "#/$defs/sourceVersion"
+        },
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "checkoutPath": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "compiler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "version",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executable",
+        "args",
+        "cwd",
+        "env"
+      ],
+      "properties": {
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "size"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "mega": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "formatVersion",
+        "assetContract",
+        "path",
+        "sha256",
+        "size"
+      ],
+      "properties": {
+        "formatVersion": {
+          "const": 1
+        },
+        "assetContract": {
+          "const": "zig-autodoc-v1"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

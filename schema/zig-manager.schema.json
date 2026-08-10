@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jsr.io/@zignado/zig-manager/zig-manager.schema.json",
+  "title": "zig-manager configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sourceRoot",
+    "repository",
+    "provider",
+    "name",
+    "selector",
+    "build",
+    "docs"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "sourceRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "$ref": "#/$defs/portableSegment"
+    },
+    "name": {
+      "$ref": "#/$defs/portableSegment"
+    },
+    "selector": {
+      "type": "string",
+      "minLength": 1
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy",
+        "profile",
+        "generator",
+        "cmakePrefixPath",
+        "jobs"
+      ],
+      "properties": {
+        "strategy": {
+          "const": "cmake"
+        },
+        "profile": {
+          "enum": [
+            "debug",
+            "release",
+            "relwithdebinfo",
+            "minsizerel"
+          ]
+        },
+        "generator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cmakePrefixPath": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "jobs": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        }
+      }
+    },
+    "docs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mega"
+      ],
+      "properties": {
+        "mega": {
+          "type": "boolean"
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cmake": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "cCompiler": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "cxxCompiler": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "llvmConfig": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "clang": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "lld": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "generatorTool": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "portableSegment": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+    },
+    "nullableString": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    }
+  }
+}
