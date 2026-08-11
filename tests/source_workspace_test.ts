@@ -18,7 +18,7 @@ import {
   type RevisionDescription,
   type StatusOptions,
   type UpdateOptions,
-} from "@source-ref/source-ref";
+} from "@zignado/source-ref";
 import {
   ZigReleaseUnsupportedError,
   ZigSourceNotReadyError,
@@ -284,6 +284,37 @@ Deno.test("existing source-root symlink is rejected before source-ref mutation",
   }
 });
 
+Deno.test("locked source dependencies select LLVM 21 or 22 without version guessing", async () => {
+  await withFixture(async ({ fake, workspace }) => {
+    fake.addVersion(COMMIT_A, "0.17.0", "0.16.0", 20, 21);
+    fake.addVersion(COMMIT_B, "0.17.0", "0.16.0", 21, 22);
+    fake.addVersion(COMMIT_C, "0.17.0", "0.16.0", 22, 23);
+
+    fake.setHead("main", COMMIT_A);
+    assertEquals(
+      await workspace.prepare("latest", (prepared) => prepared.adapter.id),
+      "zig-cmake-llvm21-autodoc-v1",
+    );
+
+    fake.setHead("main", COMMIT_B);
+    assertEquals(
+      await workspace.prepare("latest", (prepared) => prepared.adapter.id),
+      "zig-cmake-llvm22-autodoc-v1",
+    );
+
+    fake.setHead("main", COMMIT_C);
+    const unsupported = await assertRejects(
+      () => workspace.prepare("latest", () => {}),
+      ZigReleaseUnsupportedError,
+    );
+    assertEquals(
+      (unsupported.details.sourceContract as { llvmMajor: number }).llvmMajor,
+      23,
+    );
+    assertEquals(unsupported.details.commit, COMMIT_C);
+  });
+});
+
 Deno.test("unsupported derived source version fails explicitly and releases source lock", async () => {
   await withFixture(async ({ fake, workspace }) => {
     fake.addVersion(COMMIT_D, "0.18.0");
@@ -491,6 +522,7 @@ interface VersionMetadata {
   readonly base: string;
   readonly tag: string;
   readonly distance: number;
+  readonly llvmMajor: number;
 }
 
 class FakeSourceRef implements SourceWorkspaceSourceRef {
@@ -514,8 +546,8 @@ class FakeSourceRef implements SourceWorkspaceSourceRef {
     this.checkoutPath = join(this.repositoryHome, "git-src");
   }
 
-  addVersion(commit: string, base: string, tag = base, distance = 0): void {
-    this.versions.set(commit, { base, tag, distance });
+  addVersion(commit: string, base: string, tag = base, distance = 0, llvmMajor = 21): void {
+    this.versions.set(commit, { base, tag, distance, llvmMajor });
   }
 
   setHead(branch: string, commit: string): void {
@@ -660,8 +692,38 @@ class FakeSourceRef implements SourceWorkspaceSourceRef {
     await Deno.mkdir(this.checkoutPath, { recursive: true });
     await Deno.writeTextFile(
       join(this.checkoutPath, "CMakeLists.txt"),
-      `set(ZIG_VERSION_MAJOR ${major})\nset(ZIG_VERSION_MINOR ${minor})\nset(ZIG_VERSION_PATCH ${patch})\n`,
+      [
+        "cmake_minimum_required(VERSION 3.15)",
+        `set(ZIG_VERSION_MAJOR ${major})`,
+        `set(ZIG_VERSION_MINOR ${minor})`,
+        `set(ZIG_VERSION_PATCH ${patch})`,
+        'set(ZIG_VERSION "" CACHE STRING "Override Zig version")',
+        'set(ZIG_USE_LLVM_CONFIG ON CACHE BOOL "use llvm-config")',
+        `find_package(llvm ${metadata.llvmMajor})`,
+        `find_package(clang ${metadata.llvmMajor})`,
+        `find_package(lld ${metadata.llvmMajor})`,
+        "install(SCRIPT cmake/install.cmake)",
+        "",
+      ].join("\n"),
     );
+    if (metadata.llvmMajor === 22) {
+      const sourceRoot = join(this.checkoutPath, "src");
+      await Deno.mkdir(sourceRoot, { recursive: true });
+      await Promise.all([
+        Deno.writeTextFile(
+          join(sourceRoot, "zig_llvm.cpp"),
+          "opt_bisect.setIntervals({0, limit});\n",
+        ),
+        Deno.writeTextFile(
+          join(sourceRoot, "zig_llvm-ar.cpp"),
+          '#include "llvm/ADT/StringMap.h"\n',
+        ),
+        Deno.writeTextFile(
+          join(sourceRoot, "zig_clang_driver.cpp"),
+          '#include "clang/Options/Options.h"\n',
+        ),
+      ]);
+    }
   }
 
   private result(ref: GitRef, commit: string, cloned: boolean): CheckoutResult {

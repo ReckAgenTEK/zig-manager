@@ -1,0 +1,39 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@std/assert@1.0.17": "1.0.17",
+    "jsr:@std/internal@^1.0.12": "1.0.14",
+    "jsr:@std/path@1.1.4": "1.1.4",
+    "jsr:@zignado/source-ref@0.1.0-beta.1": "0.1.0-beta.1"
+  },
+  "jsr": {
+    "@std/assert@1.0.17": {
+      "integrity": "df5ebfffe77c03b3fa1401e11c762cc8f603d51021c56c4d15a8c7ab45e90dbe",
+      "dependencies": [
+        "jsr:@std/internal"
+      ]
+    },
+    "@std/internal@1.0.14": {
+      "integrity": "291516b3d4c35024d6ffbc0a9df5bf4c64116e05b50012cf846710152d2ffdf7"
+    },
+    "@std/path@1.1.4": {
+      "integrity": "1d2d43f39efb1b42f0b1882a25486647cb851481862dc7313390b2bb044314b5",
+      "dependencies": [
+        "jsr:@std/internal"
+      ]
+    },
+    "@zignado/source-ref@0.1.0-beta.1": {
+      "integrity": "dbc84697e535a650c91e27466403575130d70e2991754c7c2bfe407cac7f9000",
+      "dependencies": [
+        "jsr:@std/path"
+      ]
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "jsr:@std/assert@1.0.17",
+      "jsr:@std/path@1.1.4",
+      "jsr:@zignado/source-ref@0.1.0-beta.1"
+    ]
+  }
+}

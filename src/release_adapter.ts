@@ -2,6 +2,7 @@ import { basename, dirname, join } from "@std/path";
 import { dirname as windowsDirname, join as windowsJoin } from "@std/path/windows";
 import { MINIMUM_GIT_VERSION, SUPPORTED_DOCS_ASSET_CONTRACT } from "./constants.ts";
 import { ZigReleaseUnsupportedError } from "./errors.ts";
+import { ZIG_CMAKE_SOURCE_CONTRACT, type ZigCMakeSourceContract } from "./source_version.ts";
 import { parseZigTag } from "./versions.ts";
 import type {
   BuildArtifactPaths,
@@ -129,6 +130,7 @@ export interface ReleaseAdapter {
   readonly verifierContractVersion: number;
   readonly requirements: ReleaseRequirements;
   supports(version: ZigSourceVersion): boolean;
+  supportsSource(version: ZigSourceVersion, contract: ZigCMakeSourceContract): boolean;
   normalizeBuildOptions(
     config: ResolvedZigManagerConfig,
     profile?: ZigBuildProfile,
@@ -153,7 +155,7 @@ const PROFILE_BUILD_TYPE: Readonly<
 };
 
 export class ZigCMake21Adapter implements ReleaseAdapter {
-  readonly id = "zig-cmake-llvm21-autodoc-v1";
+  readonly id: string = "zig-cmake-llvm21-autodoc-v1";
   readonly buildContractVersion = 1;
   readonly verifierContractVersion = 2;
   readonly requirements: ReleaseRequirements = {
@@ -368,6 +370,10 @@ export class ZigCMake21Adapter implements ReleaseAdapter {
     return parsed?.major === 0 && (parsed.minor === 16 || parsed.minor === 17);
   }
 
+  supportsSource(version: ZigSourceVersion, contract: ZigCMakeSourceContract): boolean {
+    return this.supports(version) && supportsSourceContract(contract, 21);
+  }
+
   normalizeBuildOptions(
     config: ResolvedZigManagerConfig,
     profile = config.build.profile,
@@ -466,6 +472,155 @@ export class ZigCMake21Adapter implements ReleaseAdapter {
   }
 }
 
+export class ZigCMake22Adapter extends ZigCMake21Adapter {
+  override readonly id: string = "zig-cmake-llvm22-autodoc-v1";
+  override readonly requirements: ReleaseRequirements = createLlvm22Requirements();
+
+  override supports(version: ZigSourceVersion): boolean {
+    const parsed = parseZigTag(version.base);
+    return parsed?.major === 0 && parsed.minor === 17;
+  }
+
+  override supportsSource(version: ZigSourceVersion, contract: ZigCMakeSourceContract): boolean {
+    return this.supports(version) && supportsSourceContract(contract, 22);
+  }
+}
+
+function createLlvm22Requirements(): ReleaseRequirements {
+  const base = new ZigCMake21Adapter().requirements;
+  return {
+    defaultCmakePrefix: {
+      linux: "/usr",
+      darwin: null,
+      windows: null,
+    },
+    tools: {
+      cmake: base.tools.cmake,
+      cCompiler: {
+        ...base.tools.cCompiler,
+        candidates: {
+          linux: ["/usr/bin/clang", "clang-22", "cc", "clang", "gcc"],
+          darwin: [
+            "/opt/homebrew/opt/llvm@22/bin/clang",
+            "/usr/local/opt/llvm@22/bin/clang",
+            "cc",
+            "clang",
+          ],
+          windows: ["clang.exe", "cl.exe"],
+        },
+        archPackages: ["clang"],
+      },
+      cxxCompiler: {
+        ...base.tools.cxxCompiler,
+        candidates: {
+          linux: ["/usr/bin/clang++", "clang++-22", "c++", "clang++", "g++"],
+          darwin: [
+            "/opt/homebrew/opt/llvm@22/bin/clang++",
+            "/usr/local/opt/llvm@22/bin/clang++",
+            "c++",
+            "clang++",
+          ],
+          windows: ["clang++.exe", "cl.exe"],
+        },
+        archPackages: ["clang"],
+      },
+      llvmConfig: {
+        ...base.tools.llvmConfig,
+        candidates: {
+          linux: ["/usr/bin/llvm-config", "llvm-config-22", "llvm-config"],
+          darwin: [
+            "/opt/homebrew/opt/llvm@22/bin/llvm-config",
+            "/usr/local/opt/llvm@22/bin/llvm-config",
+            "llvm-config-22",
+            "llvm-config",
+          ],
+          windows: ["C:\\Program Files\\LLVM\\bin\\llvm-config.exe", "llvm-config.exe"],
+        },
+        required: "major 22",
+        acceptsVersion: (version) => major(version) === 22,
+        archPackages: ["llvm"],
+      },
+      clang: {
+        ...base.tools.clang,
+        candidates: {
+          linux: ["/usr/bin/clang", "clang-22", "clang"],
+          darwin: [
+            "/opt/homebrew/opt/llvm@22/bin/clang",
+            "/usr/local/opt/llvm@22/bin/clang",
+            "clang-22",
+            "clang",
+          ],
+          windows: ["C:\\Program Files\\LLVM\\bin\\clang.exe", "clang.exe"],
+        },
+        required: "major 22",
+        acceptsVersion: (version) => major(version) === 22,
+        archPackages: ["clang"],
+      },
+      lld: {
+        ...base.tools.lld,
+        candidates: {
+          linux: ["/usr/bin/ld.lld", "ld.lld-22", "ld.lld"],
+          darwin: [
+            "/opt/homebrew/opt/llvm@22/bin/ld.lld",
+            "/usr/local/opt/llvm@22/bin/ld.lld",
+            "ld.lld",
+          ],
+          windows: ["C:\\Program Files\\LLVM\\bin\\lld-link.exe", "lld-link.exe"],
+        },
+        required: "major 22",
+        acceptsVersion: (version) => major(version) === 22,
+        archPackages: ["lld"],
+      },
+    },
+    generators: base.generators,
+    developmentFiles: {
+      headers: [
+        {
+          component: "LLVM headers",
+          relativePath: "llvm/IR/IRBuilder.h",
+          archPackages: ["llvm"],
+        },
+        {
+          component: "Clang headers",
+          relativePath: "clang/Frontend/ASTUnit.h",
+          archPackages: ["clang"],
+        },
+        {
+          component: "LLD headers",
+          relativePath: "lld/Common/Driver.h",
+          archPackages: ["lld"],
+        },
+      ],
+      libraries: [
+        { component: "LLVM libraries", namePattern: /llvm/i, archPackages: ["llvm"] },
+        { component: "Clang libraries", namePattern: /clang/i, archPackages: ["clang"] },
+        { component: "LLD libraries", namePattern: /lld/i, archPackages: ["lld"] },
+      ],
+    },
+    llvmTargets: base.llvmTargets,
+    archPackages: base.archPackages,
+    archPackageConstraints: {
+      cmake: base.archPackageConstraints.cmake,
+      llvm: {
+        required: "major 22",
+        acceptsVersion: (version) => packageMajor(version) === 22,
+      },
+      clang: {
+        required: "major 22",
+        acceptsVersion: (version) => packageMajor(version) === 22,
+      },
+      lld: {
+        required: "major 22",
+        acceptsVersion: (version) => packageMajor(version) === 22,
+      },
+      ninja: base.archPackageConstraints.ninja,
+      make: base.archPackageConstraints.make,
+      git: base.archPackageConstraints.git,
+    },
+    docsAssetContract: base.docsAssetContract,
+  };
+}
+
 function parseCmakeVersion(output: string): string | null {
   return /cmake version\s+([0-9]+(?:\.[0-9]+){1,2})/i.exec(output)?.[1] ?? null;
 }
@@ -522,10 +677,26 @@ function packageNumericVersion(version: string): string | null {
   return /^([0-9]+(?:\.[0-9]+)*)/.exec(withoutEpoch)?.[1] ?? null;
 }
 
-export function releaseAdapterFor(version: ZigSourceVersion, commit?: string): ReleaseAdapter {
-  const adapter = new ZigCMake21Adapter();
-  if (adapter.supports(version)) return adapter;
+function supportsSourceContract(contract: ZigCMakeSourceContract, llvmMajor: number): boolean {
+  return contract.layout === ZIG_CMAKE_SOURCE_CONTRACT &&
+    contract.cmakeMinimum !== null &&
+    compareNumericVersions(contract.cmakeMinimum, "3.15.0") === 0 &&
+    contract.llvmMajor === llvmMajor &&
+    contract.clangMajor === llvmMajor &&
+    contract.lldMajor === llvmMajor &&
+    contract.llvmCompatibility === `llvm${llvmMajor}-v1`;
+}
+
+export function releaseAdapterFor(
+  version: ZigSourceVersion,
+  contract: ZigCMakeSourceContract,
+  commit?: string,
+): ReleaseAdapter {
+  for (const adapter of [new ZigCMake22Adapter(), new ZigCMake21Adapter()]) {
+    if (adapter.supportsSource(version, contract)) return adapter;
+  }
   throw new ZigReleaseUnsupportedError(version.text, {
+    sourceContract: contract,
     ...(commit === undefined ? {} : { commit }),
   });
 }

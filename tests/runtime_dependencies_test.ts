@@ -6,8 +6,10 @@ import { cleanup, writeElf64X86_64 } from "./test_helpers.ts";
 
 Deno.test("Linux runtime inspector records physical interpreter and dependency fingerprints", async () => {
   await withRuntimeFixture(async ({ root, cacheRoot, executable, interpreter, library }) => {
+    const libraryAlias = join(root, "libfixture.so.1");
+    await Deno.symlink(library, libraryAlias);
     const runner = new LddRunner(
-      `linux-vdso.so.1 (0x1)\nlibfixture.so => ${library} (0x2)\n${interpreter} (0x3)\n`,
+      `linux-vdso.so.1 (0x1)\nlibfixture.so => ${libraryAlias} (0x2)\n${interpreter} (0x3)\n`,
     );
     const inspector = new LinuxRuntimeDependencyInspector({ runner });
     const runtime = await inspector.inspect({
@@ -90,12 +92,12 @@ Deno.test("Linux runtime inspector rejects unresolved, duplicate, missing, and c
       { output: `libmissing.so => ${join(root, "missing.so")} (0x1)\n`, message: "missing" },
     ];
     const cached = join(cacheRoot, "libcache.so");
-    const linked = join(root, "liblinked.so");
+    const cachedAlias = join(root, "libcache-alias.so");
     await Deno.mkdir(cacheRoot, { recursive: true });
     await Deno.writeTextFile(cached, "cache dependency\n");
-    await Deno.symlink(library, linked);
+    await Deno.symlink(cached, cachedAlias);
     cases.push({ output: `libcache.so => ${cached} (0x1)\n`, message: "cache root" });
-    cases.push({ output: `liblinked.so => ${linked} (0x1)\n`, message: "symlink" });
+    cases.push({ output: `libcache.so => ${cachedAlias} (0x1)\n`, message: "cache root" });
     for (const item of cases) {
       await assertRejects(
         () =>

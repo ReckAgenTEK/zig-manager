@@ -269,7 +269,8 @@ export async function inspectBuildPrerequisites(context: DoctorContext): Promise
           required: requirements.llvmTargets,
           found: targets.available,
           checkedPaths: [llvmConfig.executable],
-          remediation: "Use an LLVM 21 build containing every target required by this Zig adapter.",
+          remediation:
+            `Use an LLVM build satisfying ${requirements.tools.llvmConfig.required} and containing every target required by this Zig adapter.`,
           details: { missing: targets.missing, arguments: ["--targets-built"] },
         }),
         archPackages: requirements.tools.llvmConfig.archPackages,

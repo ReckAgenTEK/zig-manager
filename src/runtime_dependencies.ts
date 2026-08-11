@@ -129,8 +129,8 @@ async function physicalDependency(
   } catch (cause) {
     throw new TypeError(`runtime dependency is missing: ${candidate}`, { cause });
   }
-  if (candidateInfo.isSymlink) {
-    throw new TypeError(`runtime dependency must not be a symlink: ${candidate}`);
+  if (!candidateInfo.isFile && !candidateInfo.isSymlink) {
+    throw new TypeError(`runtime dependency is not a regular file or file alias: ${candidate}`);
   }
   let physical: string;
   try {

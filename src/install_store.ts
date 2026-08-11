@@ -443,7 +443,7 @@ export class InstallStore {
   async createStaging(
     component: InstallComponent,
     installationId: string,
-    operationId = this.#createOperationId(),
+    operationId: string = this.#createOperationId(),
     signal?: AbortSignal,
   ): Promise<InstallStaging> {
     throwIfAborted(signal, "create install staging", this.stagingRoot);
@@ -1223,12 +1223,16 @@ function runtimeLinkage(value: unknown, path: string): RuntimeLinkageRecord {
     throw new TypeError(`${path} contains duplicate dependency names or paths`);
   }
   const sorted = [...dependencies].sort((left, right) =>
-    left.name.localeCompare(right.name) || left.path.localeCompare(right.path)
+    compareText(left.name, right.name) || compareText(left.path, right.path)
   );
   if (canonicalJson(sorted) !== canonicalJson(dependencies)) {
     throw new TypeError(`${path}.dependencies must be canonically sorted`);
   }
   return { linkage: "dynamic", interpreter, dependencies };
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function elfFormat(value: unknown, path: string): Elf64X86_64Info {

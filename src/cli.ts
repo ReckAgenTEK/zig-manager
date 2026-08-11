@@ -1,4 +1,4 @@
-import { SourceRefError } from "@source-ref/source-ref";
+import { SourceRefError } from "@zignado/source-ref";
 import { CLI_JSON_SCHEMA_VERSION } from "./constants.ts";
 import { ZigInvalidArgumentError, ZigManagerError } from "./errors.ts";
 import { CatalogValidationError } from "./global_catalog.ts";
@@ -798,7 +798,7 @@ Usage:
   zm current|status [--path <directory>] [--check] [--json]
   zm which [zig|zls] [--path <directory>] [--json]
   zm run [<selector-or-installation-id>] -- <zig arguments>
-  zm doctor [selector] [--host] [--verify] [--strict] [--json]
+  zm doctor [selector] [--path <directory>] [--host] [--verify] [--strict] [--json]
   zm uninstall <installation-id> [--json]
   zm gc [--dry-run] [--sources] [--build-cache] [--profiles] [--json]
   zm repair [--path <directory>] [--unlock <target>] [--json]

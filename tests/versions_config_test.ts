@@ -5,13 +5,16 @@ import {
   InvalidZigSelectorError,
   listStableZigVersions,
   loadZigManagerConfig,
+  parseCmakeZigSourceContract,
   parseCmakeZigVersion,
   parseZigSelector,
   parseZigTag,
   resolveZigManagerConfig,
   resolveZigSelector,
+  ZigReleaseUnsupportedError,
   ZigVersionNotFoundError,
 } from "../src/mod.ts";
+import { releaseAdapterFor } from "../src/release_adapter.ts";
 import { COMMIT_A, COMMIT_B, testConfig } from "./test_helpers.ts";
 
 Deno.test("strict Zig tags and selectors reject malformed and prerelease values", () => {
@@ -79,6 +82,56 @@ Deno.test("source metadata derives Zig's stable and development version text", (
   );
 });
 
+Deno.test("locked CMake contract selects the exact LLVM adapter and rejects guesses", () => {
+  const version17 = deriveZigSourceVersion("0.17.0", {
+    commit: COMMIT_A,
+    tag: "0.17.0",
+    commitsSinceTag: 0,
+    abbreviatedCommit: COMMIT_A.slice(0, 9),
+  });
+  const version16 = deriveZigSourceVersion("0.16.0", {
+    commit: COMMIT_B,
+    tag: "0.16.0",
+    commitsSinceTag: 0,
+    abbreviatedCommit: COMMIT_B.slice(0, 9),
+  });
+  const llvm21 = parseCmakeZigSourceContract(cmakeSourceContract(21));
+  const declaredOnly = parseCmakeZigSourceContract(cmakeSourceContract(22));
+  const llvm22 = parseCmakeZigSourceContract(cmakeSourceContract(22), llvm22Evidence());
+  assertEquals(releaseAdapterFor(version17, llvm21).id, "zig-cmake-llvm21-autodoc-v1");
+  assertEquals(declaredOnly.llvmCompatibility, null);
+  assertThrows(
+    () => releaseAdapterFor(version17, declaredOnly, COMMIT_A),
+    ZigReleaseUnsupportedError,
+  );
+  assertEquals(releaseAdapterFor(version17, llvm22).id, "zig-cmake-llvm22-autodoc-v1");
+  assertThrows(
+    () => releaseAdapterFor(version16, llvm22, COMMIT_B),
+    ZigReleaseUnsupportedError,
+  );
+
+  const mismatched = parseCmakeZigSourceContract(
+    cmakeSourceContract(22).replace("find_package(clang 22)", "find_package(clang 21)"),
+    llvm22Evidence(),
+  );
+  const mismatchError = assertThrows(
+    () => releaseAdapterFor(version17, mismatched, COMMIT_A),
+    ZigReleaseUnsupportedError,
+  );
+  assertEquals(mismatchError.details.sourceContract, mismatched);
+  assertEquals(mismatchError.details.commit, COMMIT_A);
+
+  const unknownLayout = parseCmakeZigSourceContract(
+    cmakeSourceContract(22).replace("install(SCRIPT cmake/install.cmake)\n", ""),
+    llvm22Evidence(),
+  );
+  assertEquals(unknownLayout.layout, null);
+  assertThrows(
+    () => releaseAdapterFor(version17, unknownLayout, COMMIT_A),
+    ZigReleaseUnsupportedError,
+  );
+});
+
 Deno.test("explicit selectors require matching remote refs while commits remain exact", () => {
   const refs = [
     { kind: "tag" as const, name: "nightly", commit: COMMIT_A },
@@ -121,3 +174,27 @@ Deno.test("configuration loading rejects a managed root symlink escaping the pro
     await Deno.remove(outside, { recursive: true });
   }
 });
+
+function cmakeSourceContract(llvmMajor: number): string {
+  return [
+    "cmake_minimum_required(VERSION 3.15)",
+    "set(ZIG_VERSION_MAJOR 0)",
+    "set(ZIG_VERSION_MINOR 17)",
+    "set(ZIG_VERSION_PATCH 0)",
+    'set(ZIG_VERSION "" CACHE STRING "Override Zig version")',
+    'set(ZIG_USE_LLVM_CONFIG ON CACHE BOOL "use llvm-config")',
+    `find_package(llvm ${llvmMajor})`,
+    `find_package(clang ${llvmMajor})`,
+    `find_package(lld ${llvmMajor})`,
+    "install(SCRIPT cmake/install.cmake)",
+    "",
+  ].join("\n");
+}
+
+function llvm22Evidence() {
+  return {
+    zigLlvm: "opt_bisect.setIntervals({0, limit});",
+    zigLlvmAr: '#include "llvm/ADT/StringMap.h"',
+    clangDriver: '#include "clang/Options/Options.h"',
+  };
+}

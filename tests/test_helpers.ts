@@ -1,4 +1,4 @@
-import { LockedRequestMismatchError, RepositoryNotFoundError } from "@source-ref/source-ref";
+import { LockedRequestMismatchError, RepositoryNotFoundError } from "@zignado/source-ref";
 import { dirname, join } from "@std/path";
 import { ZigOperationAbortedError } from "../src/errors.ts";
 import type {
@@ -267,7 +267,19 @@ export class FakeSourceRef implements SourceRefApi {
     await Deno.mkdir(this.checkoutPath, { recursive: true });
     await Deno.writeTextFile(
       join(this.checkoutPath, "CMakeLists.txt"),
-      `set(ZIG_VERSION_MAJOR ${major})\nset(ZIG_VERSION_MINOR ${minor})\nset(ZIG_VERSION_PATCH ${patch})\n`,
+      [
+        "cmake_minimum_required(VERSION 3.15)",
+        `set(ZIG_VERSION_MAJOR ${major})`,
+        `set(ZIG_VERSION_MINOR ${minor})`,
+        `set(ZIG_VERSION_PATCH ${patch})`,
+        'set(ZIG_VERSION "" CACHE STRING "Override Zig version")',
+        'set(ZIG_USE_LLVM_CONFIG ON CACHE BOOL "use llvm-config")',
+        "find_package(llvm 21)",
+        "find_package(clang 21)",
+        "find_package(lld 21)",
+        "install(SCRIPT cmake/install.cmake)",
+        "",
+      ].join("\n"),
     );
   }
 

@@ -14,9 +14,9 @@ const manager = new ZigManager({
 ```
 
 Supported injections are `env`, `home`, `platform`, `architecture`, `hostTarget`, `cwd`,
-`sourceRef`, `runner`, `progress`, and component `services`. Defaults compose `PlatformPaths`,
-`GlobalConfigStore`, `GlobalOperationLockManager`, `SourceWorkspace`, `InstallStore`,
-`ToolchainProfileStore`, `GlobalCatalog`, `ScopeResolver`, `ScopePinStore`, and
+`sourceRef`, `runner`, `diagnosticProbe`, `progress`, and component `services`. Defaults compose
+`PlatformPaths`, `GlobalConfigStore`, `GlobalOperationLockManager`, `SourceWorkspace`,
+`InstallStore`, `ToolchainProfileStore`, `GlobalCatalog`, `ScopeResolver`, `ScopePinStore`, and
 `SessionShimManager`.
 
 ## Selection And Installation
@@ -24,6 +24,8 @@ Supported injections are `env`, `home`, `platform`, `architecture`, `hostTarget`
 - `versions()` returns strict stable remote tags in descending numeric order.
 - `list({ remote? })` reports local installations/profiles and optionally stable remote tags.
 - `install(selector, options?)` builds or reuses an immutable Zig without creating a pin.
+- `uninstall(installationId, options?)` removes one unreferenced immutable installation. Retained
+  profiles and dependent installations block removal.
 - `use(selector, options?)` installs, creates/reuses a profile, updates the catalog, then writes the
   selected directory pin last.
 - `useInstalled(id, options?)` validates and pins a local installation without source operations.

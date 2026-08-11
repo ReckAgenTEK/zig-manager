@@ -14,12 +14,24 @@ Install a versioned JSR release without compiling a native `zm` executable:
 ```bash
 deno install --global --name zm \
   --allow-env --allow-read --allow-write --allow-run --allow-sys \
-  jsr:@zignado/zig-manager@<version>/cli
+  jsr:@zignado/zig-manager@0.1.0-beta.1/cli
 ```
 
 These permissions are needed to read XDG and scope state, write user-owned manager data, inspect the
 host, and directly execute source-ref, build tools, and managed Zig. `zm` does not use the
 permissions to modify system package state.
+
+Upgrade intentionally to a newer release by adding `--force`:
+
+```bash
+deno install --global --force --name zm \
+  --allow-env --allow-read --allow-write --allow-run --allow-sys \
+  jsr:@zignado/zig-manager@<new-version>/cli
+```
+
+Remove only the Deno launcher with `deno uninstall --global zm`. This leaves source caches,
+immutable Zig installations, profiles, and directory pins intact; `zm purge --yes` is the separate
+destructive manager-data operation.
 
 ## Use
 
@@ -47,6 +59,7 @@ zm current
 zm run -- version
 zm update
 zm unuse
+zm uninstall <installation-id>
 ```
 
 See [`docs/cli.md`](./docs/cli.md) for the full command surface.
@@ -68,6 +81,10 @@ $XDG_CACHE_HOME/zig-manager/
 children for tests or explicit relocation. Global configuration is optional and contains build
 defaults only. It has no active/default Zig setting.
 
+Directory pins are ordinary `.zig-manager/toolchain` files. Commit one when the repository should
+share the toolchain selection; otherwise add `.zig-manager/toolchain` to the repository's
+`.gitignore`.
+
 Mutations wait abortably under ordered scope, source, install, and catalog locks while one operation
 UUID owns their staging and build logs. The first `SIGINT` or `SIGTERM` cancels that work, cleans
 only owned staging, releases locks, and is then re-raised. Failed or cancelled build logs remain
@@ -87,7 +104,8 @@ if (current.mode === "managed") {
 ```
 
 The facade supports injected environment, home, platform, working directory, `source-ref`, process
-runner, and component services for deterministic offline tests. See [`docs/api.md`](./docs/api.md).
+runner, diagnostic probe, and component services for deterministic offline tests. See
+[`docs/api.md`](./docs/api.md).
 
 ## Host And Build Contract
 
@@ -95,10 +113,12 @@ The initial runtime gate is Arch Linux x86_64. Other operating systems and archi
 `ZIG_HOST_UNSUPPORTED` before manager mutation. Windows runtime resolution and ZLS build support are
 intentionally deferred and return clear errors; their storage seams are retained.
 
-The current adapter supports proven Zig 0.16/0.17 source layouts with LLVM 21. Before building, the
-manager runs `source-ref` doctor and adapter-owned CMake/compiler/LLVM/Clang/LLD/generator,
-development-file, target, filesystem, and disk checks. Missing prerequisites stop the operation. No
-fallback build strategy or package installation is attempted.
+The release adapters support proven Zig 0.16/0.17 CMake source contracts with the exact
+LLVM/Clang/LLD 21 or 22 major declared by the locked checkout. Unknown or mismatched contracts fail
+before prerequisite probing. Before building, the manager runs `source-ref` doctor and adapter-owned
+CMake/compiler/LLVM/Clang/LLD/generator, development-file, target, filesystem, and disk checks.
+Missing prerequisites stop the operation. No fallback build strategy or package installation is
+attempted.
 
 `zm doctor --host` remains offline. Diagnostics use stable schema-v2 findings, distinguish blocking
 errors from warnings, inspect both cache-build and data-staging filesystems, memory,
@@ -114,4 +134,12 @@ deno task zm help
 ```
 
 Normal tests are offline and use fakes; they do not compile Zig or contact Codeberg. The real Arch
-source-build test remains opt-in with `ZIG_MANAGER_E2E=1`.
+release gate remains opt-in and creates isolated manager and Deno-install roots:
+
+```text
+deno task test:e2e:arch
+```
+
+It builds real Codeberg `HEAD` plus a second exact Zig profile, so it is intentionally expensive.
+Set `ZIG_MANAGER_E2E_KEEP=1` to preserve the temporary sandbox for inspection. A failed preserved
+run can continue with `ZIG_MANAGER_E2E_SANDBOX=/absolute/sandbox/path deno task test:e2e:arch`.

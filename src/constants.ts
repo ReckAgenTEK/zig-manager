@@ -1,6 +1,6 @@
-import { MINIMUM_GIT_VERSION as SOURCE_REF_MINIMUM_GIT_VERSION } from "@source-ref/source-ref";
+import { MINIMUM_GIT_VERSION as SOURCE_REF_MINIMUM_GIT_VERSION } from "@zignado/source-ref";
 
-export const ZIG_MANAGER_VERSION = "0.0.0";
+export const ZIG_MANAGER_VERSION = "0.1.0-beta.1";
 
 export const CONFIG_SCHEMA_VERSION = 1 as const;
 export const STATE_SCHEMA_VERSION = 2 as const;

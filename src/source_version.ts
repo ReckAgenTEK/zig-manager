@@ -4,26 +4,71 @@ import { compareZigVersions, parseZigTag } from "./versions.ts";
 import type { RevisionDescription, ZigSourceVersion } from "./types.ts";
 
 const MAX_CMAKE_LISTS_BYTES = 1024 * 1024;
+const MAX_CONTRACT_SOURCE_BYTES = 2 * 1024 * 1024;
+
+export const ZIG_CMAKE_SOURCE_CONTRACT = "zig-cmake-stage3-v1" as const;
+
+export interface ZigCMakeSourceContract {
+  readonly layout: typeof ZIG_CMAKE_SOURCE_CONTRACT | null;
+  readonly cmakeMinimum: string | null;
+  readonly llvmMajor: number | null;
+  readonly clangMajor: number | null;
+  readonly lldMajor: number | null;
+  readonly versionOverride: boolean;
+  readonly llvmConfigToggle: boolean;
+  readonly installScript: boolean;
+  readonly llvmCompatibility: "llvm21-v1" | "llvm22-v1" | null;
+}
+
+export interface ZigCMakeSourceEvidence {
+  readonly zigLlvm: string;
+  readonly zigLlvmAr: string;
+  readonly clangDriver: string;
+}
+
+export interface ZigSourceMetadata {
+  readonly version: ZigSourceVersion;
+  readonly contract: ZigCMakeSourceContract;
+}
 
 export async function readZigSourceVersion(
   checkoutPath: string,
   revision: RevisionDescription,
 ): Promise<ZigSourceVersion> {
+  const text = await readCmakeLists(checkoutPath);
+  return deriveZigSourceVersion(parseCmakeZigVersion(text), revision);
+}
+
+export async function readZigSourceMetadata(
+  checkoutPath: string,
+  revision: RevisionDescription,
+): Promise<ZigSourceMetadata> {
+  const text = await readCmakeLists(checkoutPath);
+  const preliminary = parseCmakeZigSourceContract(text);
+  const evidence = preliminary.llvmMajor === 22 && preliminary.clangMajor === 22 &&
+      preliminary.lldMajor === 22
+    ? await readLlvm22SourceEvidence(checkoutPath)
+    : undefined;
+  return {
+    version: deriveZigSourceVersion(parseCmakeZigVersion(text), revision),
+    contract: parseCmakeZigSourceContract(text, evidence),
+  };
+}
+
+async function readCmakeLists(checkoutPath: string): Promise<string> {
   const path = join(checkoutPath, "CMakeLists.txt");
-  let text: string;
   try {
     const stat = await Deno.stat(path);
     if (!stat.isFile || stat.size > MAX_CMAKE_LISTS_BYTES) {
       throw new Error(`expected a file no larger than ${MAX_CMAKE_LISTS_BYTES} bytes`);
     }
-    text = await Deno.readTextFile(path);
+    return await Deno.readTextFile(path);
   } catch (cause) {
     throw new ZigSourceNotReadyError("CMakeLists.txt could not be read for version metadata", {
       path,
       cause: cause instanceof Error ? cause.message : String(cause),
     });
   }
-  return deriveZigSourceVersion(parseCmakeZigVersion(text), revision);
 }
 
 export function parseCmakeZigVersion(text: string): string {
@@ -37,6 +82,81 @@ export function parseCmakeZigVersion(text: string): string {
     });
   }
   return base;
+}
+
+export function parseCmakeZigSourceContract(
+  text: string,
+  evidence?: ZigCMakeSourceEvidence,
+): ZigCMakeSourceContract {
+  const cmakeMinimum = uniqueCapture(
+    text,
+    /^[ \t]*cmake_minimum_required\s*\(\s*VERSION\s+([0-9]+(?:\.[0-9]+){1,2})\s*\)[ \t]*(?:#[^\r\n]*)?$/gim,
+  );
+  const llvmMajor = cmakePackageMajor(text, "llvm");
+  const clangMajor = cmakePackageMajor(text, "clang");
+  const lldMajor = cmakePackageMajor(text, "lld");
+  const versionOverride = hasUniqueStatement(
+    text,
+    /^[ \t]*set\s*\(\s*ZIG_VERSION\s+""\s+CACHE\s+STRING(?:\s+[^)\r\n]*)?\)[ \t]*(?:#[^\r\n]*)?$/gim,
+  );
+  const llvmConfigToggle = hasUniqueStatement(
+    text,
+    /^[ \t]*set\s*\(\s*ZIG_USE_LLVM_CONFIG\s+ON\s+CACHE\s+BOOL(?:\s+[^)\r\n]*)?\)[ \t]*(?:#[^\r\n]*)?$/gim,
+  );
+  const installScript = hasUniqueStatement(
+    text,
+    /^[ \t]*install\s*\(\s*SCRIPT\s+"?cmake\/install\.cmake"?\s*\)[ \t]*(?:#[^\r\n]*)?$/gim,
+  );
+  const layout = versionOverride && llvmConfigToggle && installScript
+    ? ZIG_CMAKE_SOURCE_CONTRACT
+    : null;
+  const alignedMajor = llvmMajor !== null && llvmMajor === clangMajor && llvmMajor === lldMajor;
+  const llvmCompatibility = layout !== null && alignedMajor && llvmMajor === 21
+    ? "llvm21-v1"
+    : layout !== null && alignedMajor && llvmMajor === 22 && supportsLlvm22SourceApi(evidence)
+    ? "llvm22-v1"
+    : null;
+  return {
+    layout,
+    cmakeMinimum,
+    llvmMajor,
+    clangMajor,
+    lldMajor,
+    versionOverride,
+    llvmConfigToggle,
+    installScript,
+    llvmCompatibility,
+  };
+}
+
+async function readLlvm22SourceEvidence(checkoutPath: string): Promise<ZigCMakeSourceEvidence> {
+  const [zigLlvm, zigLlvmAr, clangDriver] = await Promise.all([
+    readOptionalContractSource(checkoutPath, "src/zig_llvm.cpp"),
+    readOptionalContractSource(checkoutPath, "src/zig_llvm-ar.cpp"),
+    readOptionalContractSource(checkoutPath, "src/zig_clang_driver.cpp"),
+  ]);
+  return { zigLlvm, zigLlvmAr, clangDriver };
+}
+
+async function readOptionalContractSource(
+  checkoutPath: string,
+  relativePath: string,
+): Promise<string> {
+  const path = join(checkoutPath, ...relativePath.split("/"));
+  try {
+    const stat = await Deno.lstat(path);
+    if (!stat.isFile || stat.isSymlink || stat.size > MAX_CONTRACT_SOURCE_BYTES) return "";
+    return await Deno.readTextFile(path);
+  } catch {
+    return "";
+  }
+}
+
+function supportsLlvm22SourceApi(evidence: ZigCMakeSourceEvidence | undefined): boolean {
+  return evidence !== undefined &&
+    evidence.zigLlvm.includes("opt_bisect.setIntervals({0, limit});") &&
+    evidence.zigLlvmAr.includes('#include "llvm/ADT/StringMap.h"') &&
+    evidence.clangDriver.includes('#include "clang/Options/Options.h"');
 }
 
 export function deriveZigSourceVersion(
@@ -179,6 +299,31 @@ function cmakeVersionComponent(text: string, component: "MAJOR" | "MINOR" | "PAT
     throw new ZigSourceNotReadyError(`ZIG_VERSION_${component} is too large`);
   }
   return value;
+}
+
+function cmakePackageMajor(
+  text: string,
+  component: "llvm" | "clang" | "lld",
+): number | null {
+  const value = uniqueCapture(
+    text,
+    new RegExp(
+      `^[ \\t]*find_package\\s*\\(\\s*${component}\\s+([0-9]+)(?:\\.[0-9]+)*\\s*\\)[ \\t]*(?:#[^\\r\\n]*)?$`,
+      "gim",
+    ),
+  );
+  if (value === null) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function uniqueCapture(text: string, pattern: RegExp): string | null {
+  const matches = [...text.matchAll(pattern)];
+  return matches.length === 1 ? matches[0][1] ?? null : null;
+}
+
+function hasUniqueStatement(text: string, pattern: RegExp): boolean {
+  return [...text.matchAll(pattern)].length === 1;
 }
 
 function requiredText(value: unknown, path: string): string {

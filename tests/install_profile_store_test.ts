@@ -203,6 +203,37 @@ Deno.test("malformed install manifests never publish or alter existing objects",
       TypeError,
       "must be an object",
     );
+    const runtimeDependency = (name: string, path: string) => ({
+      name,
+      path,
+      size: 1,
+      sha256: "a".repeat(64),
+    });
+    const dynamicManifest = validateInstallManifest({
+      ...prepared.manifest,
+      executable: {
+        ...prepared.manifest.executable,
+        format: {
+          ...prepared.manifest.executable.format,
+          dynamicallyLinked: true,
+          interpreter: "/usr/lib/ld-linux-x86-64.so.2",
+        },
+      },
+      runtime: {
+        linkage: "dynamic",
+        interpreter: runtimeDependency("interpreter", "/usr/lib/ld-linux-x86-64.so.2"),
+        dependencies: [
+          runtimeDependency("libLLVM.so.22.1", "/usr/lib/libLLVM.so.22.1"),
+          runtimeDependency("libc.so.6", "/usr/lib/libc.so.6"),
+        ],
+      },
+    });
+    assertEquals(
+      dynamicManifest.runtime.linkage === "dynamic"
+        ? dynamicManifest.runtime.dependencies.map((dependency) => dependency.name)
+        : [],
+      ["libLLVM.so.22.1", "libc.so.6"],
+    );
     assertThrows(
       () =>
         validateInstallManifest({

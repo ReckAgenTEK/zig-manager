@@ -1,14 +1,16 @@
 {
   "name": "@zignado/zig-manager",
-  "version": "0.0.0",
+  "version": "0.1.0-beta.1",
   "license": "MIT",
   "exports": {
     ".": "./src/mod.ts",
     "./cli": "./src/cli.ts"
   },
   "imports": {
-    "@source-ref/source-ref": "jsr:@source-ref/source-ref@0.0.0",
-    "@std/path/windows": "jsr:@std/path@1.1.4/windows"
+    "@std/assert": "jsr:@std/assert@1.0.17",
+    "@std/path": "jsr:@std/path@1.1.4",
+    "@std/path/windows": "jsr:@std/path@1.1.4/windows",
+    "@zignado/source-ref": "jsr:@zignado/source-ref@0.1.0-beta.1"
   },
   "tasks": {
     "fmt": "deno fmt",
@@ -16,6 +18,7 @@
     "lint": "deno lint",
     "typecheck": "deno check src/mod.ts src/cli.ts",
     "test": "deno test --allow-env --allow-read --allow-write --allow-run tests",
+    "test:e2e:arch": "ZIG_MANAGER_E2E=1 deno test --allow-env --allow-read --allow-write --allow-run --filter 'opt-in real Arch latest' tests/e2e_opt_in_test.ts",
     "zm": "deno run --allow-env --allow-read --allow-write --allow-run --allow-sys src/cli.ts",
     "check": "deno task fmt:check && deno task lint && deno task typecheck && deno task test"
   },

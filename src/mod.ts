@@ -182,6 +182,7 @@ export {
   type ReleaseToolKey,
   type ReleaseToolRequirement,
   ZigCMake21Adapter,
+  ZigCMake22Adapter,
 } from "./release_adapter.ts";
 export {
   DenoDiagnosticProbe,
@@ -191,9 +192,15 @@ export {
 } from "./resource_diagnostics.ts";
 export {
   deriveZigSourceVersion,
+  parseCmakeZigSourceContract,
   parseCmakeZigVersion,
+  readZigSourceMetadata,
   readZigSourceVersion,
   validateZigSourceVersion,
+  ZIG_CMAKE_SOURCE_CONTRACT,
+  type ZigCMakeSourceContract,
+  type ZigCMakeSourceEvidence,
+  type ZigSourceMetadata,
 } from "./source_version.ts";
 export {
   compareZigVersions,

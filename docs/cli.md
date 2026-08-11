@@ -6,6 +6,7 @@ zm shell deactivate bash
 zm shell status
 
 zm install <selector> [--profile <profile>] [--jobs <count>]
+zm uninstall <installation-id>
 zm use <selector> [--path <directory>] [build options]
 zm use --installed <installation-id> [--path <directory>]
 zm unuse [--path <directory>]
@@ -18,7 +19,7 @@ zm status [--path <directory>] [--check]
 zm which [zig|zls] [--path <directory>]
 zm run [<selector-or-installation-id>] -- <zig arguments>
 
-zm doctor [selector] [--host] [--verify] [--strict]
+zm doctor [selector] [--path <directory>] [--host] [--verify] [--strict]
 zm gc [--dry-run] [--sources] [--build-cache] [--profiles]
 zm repair [--path <directory>] [--unlock <target>]
 zm purge (--dry-run|--yes)
@@ -37,7 +38,9 @@ eval "$(zm shell deactivate bash)"
 
 Activation is idempotent, captures the first non-manager base `PATH`, and prepends only the static
 resolver directory. Deactivation removes that resolver entry while preserving unrelated later `PATH`
-changes. Neither command edits a startup file.
+changes. Neither command edits a startup file. An exported Bash function or alias named `zig` can
+take precedence over the resolver despite `PATH`; remove it before activation when directory
+switching is required. `zm doctor --host` reports exported function precedence when detectable.
 
 `run` also rejects `--json`. Child stdout, stderr, exit code, and terminating signal pass through.
 Without a selector, it executes the Zig from the nearest directory pin and does not require shell
@@ -47,16 +50,21 @@ network operations.
 `use` builds and verifies before atomically replacing the selected directory pin. `use --installed`
 is fully local. `unuse` removes only a pin located exactly at the selected path and refuses to
 remove an inherited parent pin. `sync` preserves the exact stored source; `update` re-resolves only
-a moving stored selector.
+a moving stored selector. Commit `.zig-manager/toolchain` when a repository should share the pin;
+otherwise ignore that path in the repository.
+
+`uninstall` removes one exact immutable installation only when no retained profile or dependent
+installation references it. It never removes Deno, the `zm` launcher, external Zig installations, or
+directory pins.
 
 Plain `current` and `status` are offline. Outside pinned trees they report fallback mode rather than
 a global managed selection. `--check` queries a remote only for a moving selector and does not alter
 the pin.
 
 `doctor --host` is offline. `doctor <selector>` performs exact source and adapter checks without
-starting CMake, while plain `doctor` checks an exact stored pin or behaves as `--host` when no pin
-exists. `--verify` is valid only for a plain pinned doctor. Selector/`--host`, selector/`--verify`,
-and `--host`/`--verify` combinations are rejected.
+starting CMake, while plain `doctor` checks the nearest pin selected from `--path` or behaves as
+`--host` when no pin exists. `--verify` is valid only for a plain pinned doctor. Selector/`--host`,
+selector/`--verify`, and `--host`/`--verify` combinations are rejected.
 
 `doctor --verify` performs full immutable-install verification, including exact version and host
 target, ELF format, isolated minimal compilation/execution, and dynamic runtime dependency

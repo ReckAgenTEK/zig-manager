@@ -1,4 +1,4 @@
-import { ZigManager } from "../src/mod.ts";
+import { fromFileUrl, join } from "@std/path";
 
 const STARTUP_TIMEOUT_MS = 20_000;
 const CDP_COMMAND_TIMEOUT_MS = 15_000;
@@ -7,6 +7,9 @@ const AUTODOC_TIMEOUT_MS = 180_000;
 const INTERACTION_TIMEOUT_MS = 30_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 50;
+const FALLBACK_ZIG_VERSION = "0.0.0-e2e-fallback";
+const SECOND_BUILD_PROFILE = "minsizerel";
+const RESOLVER_BENCHMARK_RUNS = 20;
 
 type JsonObject = Record<string, unknown>;
 type CdpListener = (params: JsonObject) => void;
@@ -325,13 +328,721 @@ Deno.test({
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-    const projectRoot = Deno.env.get("ZIG_MANAGER_E2E_PROJECT_ROOT");
-    if (!projectRoot) {
-      throw new Error("ZIG_MANAGER_E2E_PROJECT_ROOT is required for the opt-in E2E test");
+    assertCondition(
+      Deno.build.os === "linux" && Deno.build.arch === "x86_64",
+      "the real release gate requires Linux x86_64",
+    );
+    const archRelease = await Deno.stat("/etc/arch-release").catch(() => null);
+    assertCondition(archRelease?.isFile, "the real release gate requires Arch Linux");
+
+    const configuredSandbox = Deno.env.get("ZIG_MANAGER_E2E_SANDBOX");
+    const resume = configuredSandbox !== undefined;
+    const sandbox = configuredSandbox ??
+      await Deno.makeTempDir({ prefix: "zig-manager-arch-e2e-" });
+    if (resume) {
+      const info = await Deno.lstat(sandbox);
+      assertCondition(info.isDirectory && !info.isSymlink, "resume sandbox must be a directory");
+      assertCondition(
+        await Deno.realPath(sandbox) === sandbox,
+        "resume sandbox must be an absolute normalized physical path",
+      );
     }
-    await new ZigManager({ cwd: projectRoot }).use("latest");
+    const keep = resume || Deno.env.get("ZIG_MANAGER_E2E_KEEP") === "1";
+    try {
+      await runArchReleaseGate(sandbox, resume);
+    } catch (cause) {
+      await logE2e(`failed; sandbox: ${sandbox}\n${errorMessage(cause)}\n`);
+      throw cause;
+    } finally {
+      if (keep) {
+        await logE2e(`preserved sandbox: ${sandbox}\n`);
+      } else {
+        await removeIfPresent(sandbox);
+      }
+    }
   },
 });
+
+interface E2eProcessResult {
+  readonly success: boolean;
+  readonly code: number;
+  readonly signal: Deno.Signal | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+interface E2eProcessOptions {
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly inheritStderr?: boolean;
+}
+
+interface E2eInstallResult {
+  readonly installationId: string;
+  readonly version: string;
+  readonly commit: string;
+  readonly executable: string;
+  readonly reused: boolean;
+}
+
+interface E2eUseResult extends E2eInstallResult {
+  readonly profileId: string;
+  readonly scopeRoot: string;
+  readonly pinPath: string;
+}
+
+async function runArchReleaseGate(sandbox: string, resume: boolean): Promise<void> {
+  const packageRoot = fromFileUrl(new URL("../", import.meta.url));
+  const localCli = fromFileUrl(new URL("../src/cli.ts", import.meta.url));
+  const managerHome = join(sandbox, "manager-home");
+  const installRoot = join(sandbox, "deno install");
+  const projectRoot = join(sandbox, "project root");
+  const childRoot = join(projectRoot, "nested child");
+  const outsideRoot = join(sandbox, "outside");
+  const fallbackBin = join(sandbox, "fallback bin");
+  const fallbackZig = join(fallbackBin, "zig");
+  const zm = join(installRoot, "bin", "zm");
+  const shimZig = join(managerHome, "data", "shims", "zig");
+  for (const path of [managerHome, projectRoot, childRoot, outsideRoot, fallbackBin]) {
+    await Deno.mkdir(path, { recursive: true });
+  }
+  await Deno.writeTextFile(
+    fallbackZig,
+    `#!/bin/sh\nif [ "\${1-}" = version ]; then\n  printf '%s\\n' '${FALLBACK_ZIG_VERSION}'\n  exit 0\nfi\nprintf 'fake fallback zig only supports version\\n' >&2\nexit 64\n`,
+    { mode: 0o755 },
+  );
+  await Deno.chmod(fallbackZig, 0o755);
+
+  const env = isolatedE2eEnvironment(managerHome, installRoot, fallbackBin);
+
+  // 1-2. Install a local non-compiled Deno launcher and execute it by name.
+  if (!resume || !(await isExecutableFile(zm))) {
+    const install = await runProcess(
+      Deno.execPath(),
+      [
+        "install",
+        "--global",
+        "--name",
+        "zm",
+        "--allow-env",
+        "--allow-read",
+        "--allow-write",
+        "--allow-run",
+        "--allow-sys",
+        "--config",
+        join(packageRoot, "deno.json"),
+        localCli,
+      ],
+      { cwd: packageRoot, env },
+    );
+    assertProcessSuccess(install, "install the isolated zm launcher");
+  }
+  const launcher = await Deno.readTextFile(zm);
+  assertCondition(launcher.startsWith("#!"), "the installed zm launcher is not a script");
+  assertCondition(
+    launcher.includes("deno") && launcher.includes("run"),
+    "zm is not a Deno launcher",
+  );
+  assertCondition(!launcher.includes("--compile"), "zm launcher unexpectedly uses compilation");
+  const help = await runProcess("zm", ["help"], { cwd: projectRoot, env });
+  assertProcessSuccess(help, "run the installed zm launcher");
+  assertCondition(help.stdout.includes("directory-scoped"), "installed zm help is unexpected");
+
+  // 3. Activation is applied only by evaluating generated Bash output.
+  const activation = await runBash(
+    `set -euo pipefail
+eval "$("$ZM" shell activate bash)"
+cd "$OUTSIDE"
+printf 'active=%s\n' "$ZM_SESSION_ACTIVE"
+printf 'version=%s\n' "$(zig version)"
+`,
+    outsideRoot,
+    { ...env, ZM: zm, OUTSIDE: outsideRoot },
+  );
+  assertProcessSuccess(activation, "activate the initial Bash session");
+  const activationValues = parseKeyValues(activation.stdout);
+  assertCondition(activationValues.active === "1", "Bash activation did not mark the session");
+  assertCondition(
+    activationValues.version === FALLBACK_ZIG_VERSION,
+    "activation changed Zig outside every pin",
+  );
+
+  // 4-6. Resolve literal Codeberg HEAD, build it, and pin only the temporary project root.
+  const initialStarted = performance.now();
+  const initial = parseUseResult(
+    await runZmSuccess(zm, ["use", "latest", "--path", projectRoot, "--json"], {
+      cwd: projectRoot,
+      env,
+      inheritStderr: true,
+    }),
+  );
+  const initialBuildMs = performance.now() - initialStarted;
+  if (!resume) {
+    assertCondition(
+      !initial.reused,
+      "isolated latest unexpectedly reused an existing installation",
+    );
+  }
+  assertCondition(/^[0-9a-f]{40}$/.test(initial.commit), "latest did not resolve an exact commit");
+  assertCondition(await isExecutableFile(initial.executable), "latest executable is not runnable");
+  const initialAdapter = await installAdapterId(managerHome, initial.installationId);
+  assertCondition(
+    initialAdapter === "zig-cmake-llvm22-autodoc-v1",
+    `latest selected unexpected adapter ${initialAdapter}`,
+  );
+  await logE2e(
+    `latest commit=${initial.commit} adapter=${initialAdapter} installation=${initial.installationId}\n`,
+  );
+
+  // 6-9. One activated shell switches by directory; unactivated and future shells stay coherent.
+  const activated = await activatedDirectoryProbe(zm, env, projectRoot, childRoot, outsideRoot);
+  assertCondition(activated.root === initial.version, "managed Zig is not active at the pin root");
+  assertCondition(
+    activated.child === initial.version,
+    "managed Zig is not inherited below the pin",
+  );
+  assertCondition(
+    activated.outside === FALLBACK_ZIG_VERSION,
+    "the activated shell did not restore fallback Zig outside the pin",
+  );
+  const outsideStatus = await runZmSuccess(
+    zm,
+    ["current", "--path", outsideRoot, "--json"],
+    { cwd: outsideRoot, env },
+  );
+  assertCondition(outsideStatus.mode === "fallback", "outside current mode is not fallback");
+  assertCondition(
+    outsideStatus.executable === fallbackZig,
+    "outside fallback does not preserve the exact pre-activation Zig path",
+  );
+
+  const unactivated = await runBash(
+    `set -euo pipefail
+cd "$ROOT"
+printf 'path=%s\n' "$(command -v zig)"
+printf 'version=%s\n' "$(zig version)"
+`,
+    projectRoot,
+    { ...env, ROOT: projectRoot },
+  );
+  assertProcessSuccess(unactivated, "probe an unactivated shell inside the pin");
+  const unactivatedValues = parseKeyValues(unactivated.stdout);
+  assertCondition(unactivatedValues.path === fallbackZig, "unactivated shell changed Zig PATH");
+  assertCondition(
+    unactivatedValues.version === FALLBACK_ZIG_VERSION,
+    "unactivated shell used managed Zig",
+  );
+  const future = await activatedDirectoryProbe(zm, env, projectRoot, childRoot, outsideRoot);
+  assertCondition(
+    future.root === initial.version,
+    "a future activated shell lost the persistent pin",
+  );
+
+  // 10. Compile and run a real program through the directory-aware resolver.
+  const source = join(projectRoot, "hello-e2e.zig");
+  const program = join(projectRoot, "hello-e2e");
+  await Deno.writeTextFile(source, "pub fn main() void {}\n");
+  const compile = await runBash(
+    `set -euo pipefail
+eval "$("$ZM" shell activate bash)"
+cd "$ROOT"
+zig build-exe "$SOURCE" "-femit-bin=$PROGRAM"
+"$PROGRAM"
+printf 'compiled=ok\n'
+`,
+    projectRoot,
+    { ...env, ZM: zm, ROOT: projectRoot, SOURCE: source, PROGRAM: program },
+  );
+  assertProcessSuccess(compile, "compile and run through the managed resolver");
+  assertCondition(parseKeyValues(compile.stdout).compiled === "ok", "managed program did not run");
+
+  // Measure resolver overhead against the same compiler invoked directly.
+  const resolverEnv = {
+    ...env,
+    PATH: `${join(managerHome, "data", "shims")}:${env.PATH}`,
+    ZM_SESSION_ACTIVE: "1",
+    ZM_BASE_PATH: env.PATH,
+    ZM_DATA_DIR: join(managerHome, "data"),
+    ZM_SHIM_DIR: join(managerHome, "data", "shims"),
+    ZM_PROFILES_DIR: join(managerHome, "data", "profiles"),
+  };
+  await runVersionOnce(shimZig, projectRoot, resolverEnv);
+  await runVersionOnce(initial.executable, projectRoot, env);
+  const resolverAverageMs = await benchmarkVersion(shimZig, projectRoot, resolverEnv);
+  const directAverageMs = await benchmarkVersion(initial.executable, projectRoot, env);
+
+  // 11. A second literal latest observation must resolve to the same recipe and skip the build.
+  const reuseStarted = performance.now();
+  const reused = parseUseResult(
+    await runZmSuccess(zm, ["use", "latest", "--path", projectRoot, "--json"], {
+      cwd: projectRoot,
+      env,
+      inheritStderr: true,
+    }),
+  );
+  const reuseMs = performance.now() - reuseStarted;
+  assertCondition(reused.reused, "unchanged latest did not reuse its exact recipe");
+  assertCondition(
+    reused.commit === initial.commit,
+    "Codeberg HEAD advanced during the release gate",
+  );
+  assertCondition(
+    reused.installationId === initial.installationId && reused.profileId === initial.profileId,
+    "unchanged latest produced a different install or profile",
+  );
+
+  // 12. Build a second exact Zig once, then publish it to a nested scope without rebuilding.
+  const secondSelector = `commit:${initial.commit}`;
+  const secondStarted = performance.now();
+  const second = parseInstallResult(
+    await runZmSuccess(
+      zm,
+      ["install", secondSelector, "--profile", SECOND_BUILD_PROFILE, "--json"],
+      {
+        cwd: projectRoot,
+        env,
+        inheritStderr: true,
+      },
+    ),
+  );
+  const secondBuildMs = performance.now() - secondStarted;
+  assertCondition(
+    second.installationId !== initial.installationId,
+    "the second selector did not produce a distinct Zig installation",
+  );
+  const nested = parseUseResult(
+    await runZmSuccess(
+      zm,
+      ["use", "--installed", second.installationId, "--path", childRoot, "--json"],
+      { cwd: childRoot, env, inheritStderr: true },
+    ),
+  );
+  assertCondition(nested.reused, "nested use --installed unexpectedly rebuilt Zig");
+  const rootStatus = await runZmSuccess(
+    zm,
+    ["current", "--path", projectRoot, "--json"],
+    { cwd: projectRoot, env },
+  );
+  const childStatus = await runZmSuccess(
+    zm,
+    ["current", "--path", childRoot, "--json"],
+    { cwd: childRoot, env },
+  );
+  assertCondition(
+    rootStatus.installationId === initial.installationId,
+    "nested publication changed the parent pin",
+  );
+  assertCondition(
+    childStatus.installationId === second.installationId,
+    "the nearest nested pin did not win",
+  );
+  const secondAdapter = await installAdapterId(managerHome, second.installationId);
+  await logE2e(
+    `second commit=${second.commit} adapter=${secondAdapter} installation=${second.installationId}\n`,
+  );
+
+  const storage = {
+    sources: await directoryBytes(join(managerHome, "cache", "sources")),
+    builds: await directoryBytes(join(managerHome, "cache", "builds")),
+    logs: await directoryBytes(join(managerHome, "cache", "logs")),
+    installs: await directoryBytes(join(managerHome, "data", "installs")),
+    profiles: await directoryBytes(join(managerHome, "data", "profiles")),
+  };
+
+  // 13 and 15. Hide make in an isolated PATH and verify real Arch diagnostics block pre-configure.
+  const parentPin = join(projectRoot, ".zig-manager", "toolchain");
+  const pinBeforeFailure = await Deno.readTextFile(parentPin);
+  const buildsBeforeFailure = await relativeTree(join(managerHome, "cache", "builds"));
+  const restrictedPath = join(sandbox, "restricted tool path");
+  if (!resume) {
+    await Deno.mkdir(restrictedPath);
+    for (
+      const [name, target] of [
+        ["deno", Deno.execPath()],
+        ["git", "/usr/bin/git"],
+        ["cmake", "/usr/bin/cmake"],
+      ] as const
+    ) {
+      await Deno.symlink(target, join(restrictedPath, name));
+    }
+  }
+  const failed = await runZmFailure(
+    zm,
+    ["use", "latest", "--path", projectRoot, "--json"],
+    {
+      cwd: projectRoot,
+      env: {
+        ...env,
+        PATH: restrictedPath,
+        ZIG_MANAGER_BUILD_GENERATOR: "Unix Makefiles",
+      },
+    },
+  );
+  assertCondition(
+    failed.code === "ZIG_BUILD_PREREQUISITE_MISSING",
+    `missing make returned unexpected error ${String(failed.code)}`,
+  );
+  const failedDetails = requiredObject(failed.details, "failed use details");
+  const findings = failedDetails.findings;
+  assertCondition(Array.isArray(findings), "failed use omitted prerequisite findings");
+  const generatorFinding = findings.map((item) => asObject(item)).find((item) =>
+    item?.code === "ZIG_GENERATOR_UNAVAILABLE"
+  );
+  assertCondition(
+    generatorFinding !== undefined && generatorFinding !== null,
+    "missing make did not report its generator error",
+  );
+  assertCondition(
+    typeof generatorFinding.remediation === "string" && generatorFinding.remediation.length > 0,
+    "missing make diagnostic is not actionable",
+  );
+  const packageHints = generatorFinding.packageHints;
+  assertCondition(Array.isArray(packageHints), "generator package hints are absent");
+  const makeHint = packageHints.map((item) => asObject(item)).find((item) =>
+    item?.manager === "pacman" && item.name === "make" && item.verified === true
+  );
+  assertCondition(makeHint !== undefined, "real pacman metadata did not verify the make package");
+  assertCondition(
+    await Deno.readTextFile(parentPin) === pinBeforeFailure,
+    "prerequisite failure changed the old parent pin",
+  );
+  assertCondition(
+    JSON.stringify(await relativeTree(join(managerHome, "cache", "builds"))) ===
+      JSON.stringify(buildsBeforeFailure),
+    "prerequisite failure created or changed build paths before configure",
+  );
+  const afterFailure = await activatedDirectoryProbe(
+    zm,
+    env,
+    projectRoot,
+    childRoot,
+    outsideRoot,
+  );
+  assertCondition(afterFailure.root === initial.version, "failure changed the parent managed Zig");
+  assertCondition(afterFailure.child === second.version, "failure changed the nested managed Zig");
+  assertCondition(
+    afterFailure.outside === FALLBACK_ZIG_VERSION,
+    "failure changed fallback Zig outside the pins",
+  );
+
+  // 14. Source, build, and log caches are replaceable; immutable installs remain runnable.
+  for (const name of ["sources", "builds", "logs"]) {
+    await removeIfPresent(join(managerHome, "cache", name));
+  }
+  const afterCacheDeletion = await activatedDirectoryProbe(
+    zm,
+    env,
+    projectRoot,
+    childRoot,
+    outsideRoot,
+  );
+  assertCondition(
+    afterCacheDeletion.root === initial.version && afterCacheDeletion.child === second.version,
+    "cache deletion broke a pinned immutable Zig",
+  );
+  assertCondition(
+    afterCacheDeletion.outside === FALLBACK_ZIG_VERSION,
+    "cache deletion changed fallback behavior",
+  );
+
+  await logE2e(`${
+    JSON.stringify({
+      initial: {
+        resumed: resume,
+        commit: initial.commit,
+        adapter: initialAdapter,
+        installationId: initial.installationId,
+        buildMs: Math.round(initialBuildMs),
+        reuseMs: Math.round(reuseMs),
+      },
+      second: {
+        selector: secondSelector,
+        profile: SECOND_BUILD_PROFILE,
+        commit: second.commit,
+        adapter: secondAdapter,
+        installationId: second.installationId,
+        buildMs: Math.round(secondBuildMs),
+      },
+      resolver: {
+        runs: RESOLVER_BENCHMARK_RUNS,
+        resolverAverageMs,
+        directAverageMs,
+        estimatedOverheadMs: resolverAverageMs - directAverageMs,
+      },
+      storageBytes: storage,
+      archDiagnosticPackage: makeHint,
+    })
+  }\n`);
+}
+
+function isolatedE2eEnvironment(
+  managerHome: string,
+  installRoot: string,
+  fallbackBin: string,
+): Record<string, string> {
+  const env = Deno.env.toObject();
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("ZIG_MANAGER_") || key.startsWith("ZM_")) delete env[key];
+  }
+  const originalPath = env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/bin";
+  env.ZIG_MANAGER_HOME = managerHome;
+  env.DENO_INSTALL_ROOT = installRoot;
+  env.DENO_NO_UPDATE_CHECK = "1";
+  env.NO_COLOR = "1";
+  env.PATH = `${fallbackBin}:${join(installRoot, "bin")}:${originalPath}`;
+  return env;
+}
+
+async function activatedDirectoryProbe(
+  zm: string,
+  env: Readonly<Record<string, string>>,
+  projectRoot: string,
+  childRoot: string,
+  outsideRoot: string,
+): Promise<Readonly<Record<"root" | "child" | "outside", string>>> {
+  const output = await runBash(
+    `set -euo pipefail
+eval "$("$ZM" shell activate bash)"
+cd "$ROOT"
+printf 'root=%s\n' "$(zig version)"
+cd "$CHILD"
+printf 'child=%s\n' "$(zig version)"
+cd "$OUTSIDE"
+printf 'outside=%s\n' "$(zig version)"
+`,
+    projectRoot,
+    { ...env, ZM: zm, ROOT: projectRoot, CHILD: childRoot, OUTSIDE: outsideRoot },
+  );
+  assertProcessSuccess(output, "probe activated directory behavior");
+  const values = parseKeyValues(output.stdout);
+  assertCondition(values.root !== undefined, "activated probe omitted root version");
+  assertCondition(values.child !== undefined, "activated probe omitted child version");
+  assertCondition(values.outside !== undefined, "activated probe omitted outside version");
+  return { root: values.root, child: values.child, outside: values.outside };
+}
+
+async function runZmSuccess(
+  zm: string,
+  args: readonly string[],
+  options: E2eProcessOptions,
+): Promise<JsonObject> {
+  const result = await runProcess(zm, args, options);
+  assertProcessSuccess(result, `zm ${args.join(" ")}`);
+  const document = parseCliDocument(result.stdout);
+  return requiredObject(document.result, "CLI success result");
+}
+
+async function runZmFailure(
+  zm: string,
+  args: readonly string[],
+  options: E2eProcessOptions,
+): Promise<JsonObject> {
+  const result = await runProcess(zm, args, options);
+  assertCondition(!result.success, `zm ${args.join(" ")} unexpectedly succeeded`);
+  const document = parseCliDocument(result.stdout);
+  return requiredObject(document.error, "CLI error result");
+}
+
+function parseCliDocument(stdout: string): JsonObject {
+  const text = stdout.trim();
+  assertCondition(text.length > 0, "CLI emitted no JSON document");
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (cause) {
+    throw new Error(`CLI emitted invalid JSON: ${errorMessage(cause)}\n${text}`);
+  }
+  return requiredObject(value, "CLI document");
+}
+
+function parseInstallResult(value: JsonObject): E2eInstallResult {
+  const installationId = requiredString(value.installationId, "installationId");
+  assertCondition(/^[0-9a-f]{64}$/.test(installationId), "installationId is not SHA-256");
+  const commit = requiredString(value.commit, "commit");
+  assertCondition(/^[0-9a-f]{40}$/.test(commit), "commit is not a canonical object ID");
+  return {
+    installationId,
+    version: requiredString(value.version, "version"),
+    commit,
+    executable: requiredString(value.executable, "executable"),
+    reused: requiredBoolean(value.reused, "reused"),
+  };
+}
+
+function parseUseResult(value: JsonObject): E2eUseResult {
+  return {
+    ...parseInstallResult(value),
+    profileId: requiredString(value.profileId, "profileId"),
+    scopeRoot: requiredString(value.scopeRoot, "scopeRoot"),
+    pinPath: requiredString(value.pinPath, "pinPath"),
+  };
+}
+
+async function installAdapterId(managerHome: string, installationId: string): Promise<string> {
+  const manifestPath = join(
+    managerHome,
+    "data",
+    "installs",
+    "zig",
+    installationId,
+    "install-manifest.json",
+  );
+  const manifest = parseCliDocument(await Deno.readTextFile(manifestPath));
+  const identity = requiredObject(manifest.identity, "install identity");
+  const adapter = requiredObject(identity.adapter, "install adapter");
+  return requiredString(adapter.id, "install adapter ID");
+}
+
+async function runBash(
+  script: string,
+  cwd: string,
+  env: Readonly<Record<string, string>>,
+): Promise<E2eProcessResult> {
+  return await runProcess("/usr/bin/bash", ["--noprofile", "--norc", "-c", script], {
+    cwd,
+    env,
+  });
+}
+
+async function runProcess(
+  executable: string,
+  args: readonly string[],
+  options: E2eProcessOptions,
+): Promise<E2eProcessResult> {
+  const process = new Deno.Command(executable, {
+    args: [...args],
+    cwd: options.cwd,
+    env: { ...options.env },
+    clearEnv: true,
+    stdin: "null",
+    stdout: "piped",
+    stderr: options.inheritStderr ? "inherit" : "piped",
+  }).spawn();
+  const stdout = new Response(process.stdout).text();
+  const stderr = options.inheritStderr ? Promise.resolve("") : new Response(process.stderr).text();
+  const [status, stdoutText, stderrText] = await Promise.all([process.status, stdout, stderr]);
+  return { ...status, stdout: stdoutText, stderr: stderrText };
+}
+
+function assertProcessSuccess(result: E2eProcessResult, operation: string): void {
+  assertCondition(
+    result.success,
+    `${operation} failed with ${
+      result.signal ?? result.code
+    }\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+}
+
+function parseKeyValues(text: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of text.trim().split(/\r?\n/)) {
+    const separator = line.indexOf("=");
+    if (separator > 0) result[line.slice(0, separator)] = line.slice(separator + 1);
+  }
+  return result;
+}
+
+function requiredObject(value: unknown, label: string): JsonObject {
+  const result = asObject(value);
+  assertCondition(result !== null, `${label} must be an object`);
+  return result;
+}
+
+function requiredString(value: unknown, label: string): string {
+  assertCondition(typeof value === "string" && value.length > 0, `${label} must be text`);
+  return value;
+}
+
+function requiredBoolean(value: unknown, label: string): boolean {
+  assertCondition(typeof value === "boolean", `${label} must be boolean`);
+  return value;
+}
+
+async function isExecutableFile(path: string): Promise<boolean> {
+  const info = await Deno.stat(path).catch(() => null);
+  return info?.isFile === true && (info.mode === null || (info.mode & 0o111) !== 0);
+}
+
+async function runVersionOnce(
+  executable: string,
+  cwd: string,
+  env: Readonly<Record<string, string>>,
+): Promise<void> {
+  const result = await new Deno.Command(executable, {
+    args: ["version"],
+    cwd,
+    env: { ...env },
+    clearEnv: true,
+    stdin: "null",
+    stdout: "null",
+    stderr: "null",
+  }).output();
+  assertCondition(result.success, `${executable} version failed during resolver benchmark`);
+}
+
+async function benchmarkVersion(
+  executable: string,
+  cwd: string,
+  env: Readonly<Record<string, string>>,
+): Promise<number> {
+  const started = performance.now();
+  for (let index = 0; index < RESOLVER_BENCHMARK_RUNS; index++) {
+    await runVersionOnce(executable, cwd, env);
+  }
+  return (performance.now() - started) / RESOLVER_BENCHMARK_RUNS;
+}
+
+async function directoryBytes(path: string): Promise<number> {
+  const info = await Deno.lstat(path).catch((cause) => {
+    if (cause instanceof Deno.errors.NotFound) return null;
+    throw cause;
+  });
+  if (info === null) return 0;
+  if (!info.isDirectory) return info.size;
+  let total = 0;
+  for await (const entry of Deno.readDir(path)) {
+    total += await directoryBytes(join(path, entry.name));
+  }
+  return total;
+}
+
+async function relativeTree(root: string): Promise<string[]> {
+  const result: string[] = [];
+  await appendRelativeTree(root, "", result);
+  return result.sort();
+}
+
+async function appendRelativeTree(root: string, relative: string, result: string[]): Promise<void> {
+  const path = relative.length === 0 ? root : join(root, relative);
+  let entries: Deno.DirEntry[];
+  try {
+    entries = [];
+    for await (const entry of Deno.readDir(path)) entries.push(entry);
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return;
+    throw cause;
+  }
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    const child = relative.length === 0 ? entry.name : join(relative, entry.name);
+    result.push(`${entry.isDirectory ? "d" : entry.isSymlink ? "l" : "f"}:${child}`);
+    if (entry.isDirectory) await appendRelativeTree(root, child, result);
+  }
+}
+
+async function removeIfPresent(path: string): Promise<void> {
+  try {
+    await Deno.remove(path, { recursive: true });
+  } catch (cause) {
+    if (!(cause instanceof Deno.errors.NotFound)) throw cause;
+  }
+}
+
+async function logE2e(text: string): Promise<void> {
+  const bytes = new TextEncoder().encode(`[zig-manager e2e] ${text}`);
+  let offset = 0;
+  while (offset < bytes.length) offset += await Deno.stderr.write(bytes.subarray(offset));
+}
 
 // The separate opt-in invocation requires --allow-net=127.0.0.1 for CDP.
 Deno.test({

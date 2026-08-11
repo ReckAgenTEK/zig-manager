@@ -16,7 +16,7 @@ import {
   SourceRefStore,
   type StatusOptions,
   type UpdateOptions,
-} from "@source-ref/source-ref";
+} from "@zignado/source-ref";
 import { isAbsolute, join, resolve } from "@std/path";
 import {
   InvalidZigSelectorError,
@@ -33,8 +33,8 @@ import {
   validateResolvedSource,
 } from "./install_store.ts";
 import { type ReleaseAdapter, releaseAdapterFor } from "./release_adapter.ts";
-import { readZigSourceVersion } from "./source_version.ts";
-import type { RevisionDescription, ZigSourceVersion } from "./types.ts";
+import { readZigSourceMetadata } from "./source_version.ts";
+import type { RevisionDescription, ZigSemanticVersion, ZigSourceVersion } from "./types.ts";
 import { listStableZigVersions, parseZigSelector, resolveZigSelector } from "./versions.ts";
 
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -224,7 +224,7 @@ export class SourceWorkspace {
     return resolutionFromSelection(selector, selected.ref, selected.remoteCommit, this.#now);
   }
 
-  async versions(signal?: AbortSignal) {
+  async versions(signal?: AbortSignal): Promise<ZigSemanticVersion[]> {
     throwIfAborted(signal, "list remote Zig versions");
     const refs = await this.#sourceRef.listRemoteRefs({
       url: this.#repositoryUrl,
@@ -373,7 +373,8 @@ export class SourceWorkspace {
       });
     }
 
-    const version = await readZigSourceVersion(paths.checkoutPath, revision);
+    const metadata = await readZigSourceMetadata(paths.checkoutPath, revision);
+    const { version } = metadata;
     throwIfAborted(signal, "materialize Zig source");
     if (exactSource !== undefined && version.text !== exactSource.version) {
       throw new ZigSourceNotReadyError("derived version does not match the stored exact source", {
@@ -393,7 +394,7 @@ export class SourceWorkspace {
         },
       );
     }
-    const adapter = releaseAdapterFor(version, resolution.commit);
+    const adapter = releaseAdapterFor(version, metadata.contract, resolution.commit);
     const source = exactSource ?? validateResolvedSource({
       component: "zig",
       repository: {

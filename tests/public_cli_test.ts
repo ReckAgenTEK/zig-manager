@@ -351,6 +351,8 @@ Deno.test("all published JSON schemas are strict JSON documents", async () => {
       "scopes-v1.schema.json",
       "build-manifest.schema.json",
       "docs-manifest.schema.json",
+      "zig-manager.schema.json",
+      "state.schema.json",
     ]
   ) {
     const schema = JSON.parse(await Deno.readTextFile(new URL(name, schemaRoot)));
@@ -364,12 +366,17 @@ Deno.test("package metadata publishes the inert CLI entrypoint and documents non
     await Deno.readTextFile(new URL("../deno.json", import.meta.url)),
   );
   assertEquals(deno.exports["./cli"], "./src/cli.ts");
+  assertEquals(publicApi.ZIG_MANAGER_VERSION, deno.version);
   assertStringIncludes(deno.tasks.zm, "src/cli.ts");
   assertEquals(deno.publish.include.includes("schema"), true);
   assertEquals(deno.publish.include.includes("docs"), true);
+  assertStringIncludes(deno.tasks["test:e2e:arch"], "ZIG_MANAGER_E2E=1");
 
   const readme = await Deno.readTextFile(new URL("../README.md", import.meta.url));
   assertStringIncludes(readme, "deno install --global --name zm");
+  assertStringIncludes(readme, `jsr:@zignado/zig-manager@${deno.version}/cli`);
+  assertStringIncludes(readme, "deno install --global --force --name zm");
+  assertStringIncludes(readme, "deno uninstall --global zm");
   assertEquals(readme.includes("--compile"), false);
 });
 

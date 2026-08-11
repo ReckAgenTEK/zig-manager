@@ -18,6 +18,7 @@ import {
   PlatformPaths,
   resolveZigManagerConfig,
   ZigCMake21Adapter,
+  ZigCMake22Adapter,
   ZigManager,
 } from "../src/mod.ts";
 import { DenoDiagnosticProbe, type DiagnosticProbe } from "../src/resource_diagnostics.ts";
@@ -102,6 +103,21 @@ Deno.test("adapter owns exact LLVM 21 candidates, constraints, files, targets, a
     requirements.developmentFiles.headers.some((header) => header.archPackages[0] === "lld21"),
   );
   assert(requirements.llvmTargets.includes("AMDGPU"));
+});
+
+Deno.test("LLVM 22 adapter uses Arch's unversioned current-major packages", () => {
+  const requirements = new ZigCMake22Adapter().requirements;
+  assertEquals(requirements.defaultCmakePrefix.linux, "/usr");
+  assertEquals(requirements.tools.llvmConfig.required, "major 22");
+  assertEquals(requirements.tools.llvmConfig.candidates.linux[0], "/usr/bin/llvm-config");
+  assertEquals(requirements.tools.llvmConfig.archPackages, ["llvm"]);
+  assertEquals(requirements.tools.clang.archPackages, ["clang"]);
+  assertEquals(requirements.tools.lld.archPackages, ["lld"]);
+  assertEquals(requirements.archPackageConstraints.llvm.acceptsVersion("22.1.6-1"), true);
+  assertEquals(requirements.archPackageConstraints.llvm.acceptsVersion("21.1.8-1"), false);
+  assert(
+    requirements.developmentFiles.headers.some((header) => header.archPackages[0] === "lld"),
+  );
 });
 
 Deno.test("incompatible versions and missing development requirements remain blocking errors", async () => {

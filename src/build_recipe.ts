@@ -10,7 +10,15 @@ const HASH = /^[0-9a-f]{64}$/;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const PACKAGE_NAME = /^[a-z0-9][a-z0-9@._+-]*$/;
 
-export const BUILD_RECIPE_TOOL_KEYS = Object.freeze(
+export const BUILD_RECIPE_TOOL_KEYS: readonly [
+  "cmake",
+  "cCompiler",
+  "cxxCompiler",
+  "llvmConfig",
+  "clang",
+  "lld",
+  "generatorTool",
+] = Object.freeze(
   [
     "cmake",
     "cCompiler",
@@ -100,7 +108,7 @@ export interface ZigBuildRecipeV1 {
   readonly dependencies: readonly BuildRecipeDependency[];
 }
 
-export const BUILD_RECIPE_ENVIRONMENT_KEYS = Object.freeze(
+export const BUILD_RECIPE_ENVIRONMENT_KEYS: readonly string[] = Object.freeze(
   [
     "CFLAGS",
     "CXXFLAGS",

@@ -1,0 +1,47 @@
+name: Publish to JSR
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Test and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.5
+
+      - name: Check package
+        run: deno task --frozen-lockfile check
+
+      - name: Verify release tag
+        run: |
+          deno eval '
+            const { version } = JSON.parse(await Deno.readTextFile("deno.json"));
+            const tag = Deno.env.get("GITHUB_REF_NAME");
+            if (tag !== `v${version}`) {
+              throw new Error(`Tag ${tag} does not match package version ${version}`);
+            }
+          '
+
+      - name: Verify clean checkout
+        run: |
+          git status --short
+          test -z "$(git status --porcelain)"
+
+      - name: Publish package
+        run: deno publish
