@@ -1,104 +1,117 @@
 # zig-manager
 
-`zig-manager` is a Deno 2 library and CLI for selecting, building, verifying, and using Zig from
-source. It delegates all repository operations to the public `@source-ref/source-ref` API. It never
-invokes Git or a shell and has no Node runtime path.
+`zig-manager` is an Arch Linux x86_64-first, directory-scoped manager for Zig toolchains built from
+source. Its Deno 2 CLI is named `zm`.
 
-The initial tracked source is clean upstream commit `9df02121d0d87c17173f79d55692bed9cb65722c`,
-derived as `0.17.0-dev.135+9df02121d` from source base `0.17.0` and release ancestor `0.16.0`. The
-LLVM 21 CMake adapter supports this source and the `0.16.x` release line. The manager probes
-prerequisites but never installs tools, downloads a prebuilt Zig, silently bootstraps, or chooses a
-fallback strategy.
+The manager never replaces a system Zig, creates a user-wide current Zig, edits shell startup files,
+or installs system packages. A managed selection consists of an immutable installation in XDG data
+and a `.zig-manager/toolchain` pin in one directory. The nearest ancestor pin wins.
 
-## Configuration
+## Install
 
-Create `zig-manager.json` at the project root. Unknown keys and paths escaping the project root are
-rejected.
+Install a versioned JSR release without compiling a native `zm` executable:
 
-```json
-{
-  "$schema": "./packages/zig-manager/schema/zig-manager.schema.json",
-  "sourceRoot": ".source-ref",
-  "repository": "https://codeberg.org/ziglang/zig.git",
-  "provider": "codeberg",
-  "name": "zig",
-  "selector": "commit:9df02121d0d87c17173f79d55692bed9cb65722c",
-  "build": {
-    "strategy": "cmake",
-    "profile": "release",
-    "generator": "Ninja",
-    "cmakePrefixPath": null,
-    "jobs": null
-  },
-  "docs": {
-    "mega": true
-  },
-  "tools": {
-    "cmake": null,
-    "cCompiler": null,
-    "cxxCompiler": null,
-    "llvmConfig": null,
-    "clang": null,
-    "lld": null,
-    "generatorTool": null
-  }
-}
+```bash
+deno install --global --name zm \
+  --allow-env --allow-read --allow-write --allow-run --allow-sys \
+  jsr:@zignado/zig-manager@<version>/cli
 ```
 
-Explicit tool paths can also be supplied through `ZIG_MANAGER_CMAKE`, `ZIG_MANAGER_CC`,
-`ZIG_MANAGER_CXX`, `ZIG_MANAGER_LLVM_CONFIG`, `ZIG_MANAGER_CLANG`, `ZIG_MANAGER_LLD`,
-`ZIG_MANAGER_GENERATOR_TOOL`, and `ZIG_MANAGER_CMAKE_PREFIX_PATH`. Config values take precedence.
-Versioned `/usr/lib/llvm21` Arch Linux paths are probed before unversioned LLVM tools, without
-changing system defaults or global `PATH`.
+These permissions are needed to read XDG and scope state, write user-owned manager data, inspect the
+host, and directly execute source-ref, build tools, and managed Zig. `zm` does not use the
+permissions to modify system package state.
+
+## Use
+
+```bash
+eval "$(zm shell activate bash)"
+cd ~/Projects/example
+zm use latest
+zig version
+```
+
+`latest` means the canonical Codeberg repository's symbolic remote `HEAD`, resolved through
+`source-ref` to one immutable commit. It does not mean the latest stable tag.
+
+The directory pin persists, while shell activation is session-only. In an activated shell, unpinned
+directories delegate to the Zig found on the pre-activation `PATH`. In a shell that has not
+activated `zm`, normal `PATH` resolution remains unchanged even inside a pinned directory.
+
+Useful commands include:
+
+```text
+zm install <selector>
+zm use <selector>
+zm use --installed <installation-id>
+zm current
+zm run -- version
+zm update
+zm unuse
+```
+
+See [`docs/cli.md`](./docs/cli.md) for the full command surface.
+
+## Storage
+
+Linux defaults follow XDG:
+
+```text
+$XDG_CONFIG_HOME/zig-manager/config.json
+$XDG_STATE_HOME/zig-manager/
+$XDG_DATA_HOME/zig-manager/installs/
+$XDG_DATA_HOME/zig-manager/profiles/
+$XDG_DATA_HOME/zig-manager/shims/
+$XDG_CACHE_HOME/zig-manager/
+```
+
+`ZIG_MANAGER_HOME=/absolute/path` maps these roots to `config`, `state`, `data`, and `cache`
+children for tests or explicit relocation. Global configuration is optional and contains build
+defaults only. It has no active/default Zig setting.
+
+Mutations wait abortably under ordered scope, source, install, and catalog locks while one operation
+UUID owns their staging and build logs. The first `SIGINT` or `SIGTERM` cancels that work, cleans
+only owned staging, releases locks, and is then re-raised. Failed or cancelled build logs remain
+under `$XDG_CACHE_HOME/zig-manager/logs/` until an explicit `zm gc --build-cache`.
 
 ## Library
 
 ```ts
 import { ZigManager } from "@zignado/zig-manager";
 
-const manager = new ZigManager({ projectRoot: Deno.cwd() });
-await manager.sync();
-const prerequisites = await manager.doctor();
-if (prerequisites.ok) await manager.build();
-console.log(await manager.path());
+const manager = new ZigManager({ cwd: Deno.cwd() });
+const current = await manager.current();
+
+if (current.mode === "managed") {
+  await manager.run(["version"]);
+}
 ```
 
-`ZigManager` accepts structural `sourceRef` and `runner` dependencies for fast offline tests. The
-public package root exposes the orchestrator, strict domain/config/state/build/docs types,
-constants, selector functions, typed errors, and release-adapter contract. Raw process and
-source-ref internals remain private.
+The facade supports injected environment, home, platform, working directory, `source-ref`, process
+runner, and component services for deterministic offline tests. See [`docs/api.md`](./docs/api.md).
 
-See [`docs/api.md`](./docs/api.md) for method semantics and [`docs/cli.md`](./docs/cli.md) for CLI
-usage.
+## Host And Build Contract
 
-## Safety And Artifacts
+The initial runtime gate is Arch Linux x86_64. Other operating systems and architectures fail with
+`ZIG_HOST_UNSUPPORTED` before manager mutation. Windows runtime resolution and ZLS build support are
+intentionally deferred and return clear errors; their storage seams are retained.
 
-- `use` resolves remote refs before requesting a pinned source-ref checkout.
-- `sync` reproduces the lock; only `update` re-evaluates a moving selector.
-- Source state is atomically written to `<repository-home>/zig-manager-state.json`.
-- Source state records the CMake-declared base version, full derived version, tagged ancestor,
-  commit distance, and immutable commit.
-- Builds are keyed by source commit, host target, profile, and a deterministic SHA-256 identity.
-- A build becomes active only after version, managed `lib_dir`, and executable hash verification.
-- Docs require an active verified build from the same commit and atomically replace `ref-docs` only
-  after all official outputs validate.
-- On Linux, docs run through util-linux `prlimit` with a one-byte soft `RLIMIT_CORE`. Expected Zig
-  crash examples still terminate by signal, but do not invoke the system coredump handler.
-- Docs hold an OS-backed operation lock and recover abandoned staging directories after an
-  interrupted process without touching an active generation.
-- Mega format v1 embeds the supported official Zig autodoc app and assets. Contract drift raises
-  `ZIG_MEGA_DOCS_UNSUPPORTED_FORMAT`; no replacement renderer is used.
-- `path`, `run`, and `env` never modify shell files, symlinks, or global `PATH`.
+The current adapter supports proven Zig 0.16/0.17 source layouts with LLVM 21. Before building, the
+manager runs `source-ref` doctor and adapter-owned CMake/compiler/LLVM/Clang/LLD/generator,
+development-file, target, filesystem, and disk checks. Missing prerequisites stop the operation. No
+fallback build strategy or package installation is attempted.
+
+`zm doctor --host` remains offline. Diagnostics use stable schema-v2 findings, distinguish blocking
+errors from warnings, inspect both cache-build and data-staging filesystems, memory,
+session/fallback state, and show only exact Arch package hints verified through read-only pacman
+metadata queries. `--strict` makes warnings fail doctor for CI but never changes normal build
+eligibility.
 
 ## Development
 
 ```text
-deno task fmt:check
-deno task lint
-deno task typecheck
-deno task test
+deno task check
+deno task zm help
 ```
 
-Fast tests are offline and never compile Zig. The real network/build workflow is opt-in with
-`ZIG_MANAGER_E2E=1`; browser smoke testing is separately opt-in with `ZIG_MANAGER_BROWSER_E2E=1`.
-Neither runs during the normal test task.
+Normal tests are offline and use fakes; they do not compile Zig or contact Codeberg. The real Arch
+source-build test remains opt-in with `ZIG_MANAGER_E2E=1`.

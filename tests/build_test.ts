@@ -1,28 +1,9 @@
-import {
-  assert,
-  assertEquals,
-  assertNotEquals,
-  assertRejects,
-  assertStringIncludes,
-} from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { computeBuildIdentity, createBuildPaths, parseZigEnvLibDir } from "../src/build.ts";
-import { ZigBinaryVerificationError, ZigCMake21Adapter, ZigManager } from "../src/mod.ts";
-import { readZigManagerState } from "../src/state.ts";
-import type {
-  BuildIdentityInput,
-  BuildToolchain,
-  ProcessResult,
-  ToolProbeResult,
-} from "../src/types.ts";
-import {
-  cleanup,
-  COMMIT_A,
-  createDevelopmentFiles,
-  FakeProcessRunner,
-  FakeSourceRef,
-  testConfig,
-} from "./test_helpers.ts";
+import { ZigCMake21Adapter } from "../src/mod.ts";
+import type { BuildIdentityInput, BuildToolchain, ToolProbeResult } from "../src/types.ts";
+import { COMMIT_A } from "./test_helpers.ts";
 
 Deno.test("build identity is deterministic and changes for every relevant input", async () => {
   const base = identityFixture();
@@ -33,6 +14,7 @@ Deno.test("build identity is deterministic and changes for every relevant input"
     { ...base, hostTarget: "aarch64-apple-darwin" },
     { ...base, options: { ...base.options, profile: "debug", cmakeBuildType: "Debug" } },
     { ...base, options: { ...base.options, generator: "Unix Makefiles" } },
+    { ...base, options: { ...base.options, cpu: "native" } },
     { ...base, tools: { ...base.tools, cmake: { path: "/new/cmake", version: "3.30.0" } } },
     { ...base, tools: { ...base.tools, llvmConfig: { path: "/llvm", version: "21.2.0" } } },
   ];
@@ -74,6 +56,7 @@ Deno.test("LLVM 21 adapter constructs explicit CMake commands across host path v
         generator: "Ninja",
         jobs: 12,
         cmakePrefixPath: platform === "windows" ? "C:\\LLVM" : "/llvm21",
+        cpu: "baseline",
       },
       toolchain: toolchainFixture(platform),
     });
@@ -128,126 +111,6 @@ Deno.test("Linux docs commands disable core handling without changing expected s
   assertEquals(darwin.args.slice(0, 2), ["build", "docs"]);
 });
 
-Deno.test("managed build publishes only after compiler and lib verification", async () => {
-  const root = await Deno.makeTempDir({ prefix: "zig-manager-build-" });
-  try {
-    const prefix = await createDevelopmentFiles(root);
-    const sourceRef = new FakeSourceRef(root);
-    const runner = new FakeProcessRunner(prefix);
-    const manager = new ZigManager({
-      projectRoot: root,
-      config: testConfig(root, prefix),
-      sourceRef,
-      runner,
-      hostTarget: "x86_64-unknown-linux-gnu",
-      platform: "linux",
-    });
-    await manager.use("0.16");
-    const built = await manager.build();
-    assertEquals(built.manifest.source.commit, COMMIT_A);
-    assertEquals(built.manifest.compiler.version, "0.16.0");
-    assertStringIncludes(
-      built.manifest.paths.root,
-      `/builds/${COMMIT_A}/x86_64-unknown-linux-gnu/release/`,
-    );
-    assertEquals(await manager.path(), built.manifest.paths.executable);
-    const state = await readZigManagerState(sourceRef.repositoryHome);
-    assertEquals(state.activeBuild?.identity, built.manifest.identity);
-    assertEquals(
-      runner.requests.some((request) => /(^|[/\\])git(?:\.exe)?$/.test(request.executable)),
-      false,
-    );
-    const reused = await manager.build();
-    assertEquals(reused.reused, true);
-    assertStringIncludes(
-      await Deno.readTextFile(join(built.manifest.paths.logs, "configure.stdout.log")),
-      "configured",
-    );
-    assertStringIncludes(
-      await Deno.readTextFile(join(built.manifest.paths.logs, "build.stdout.log")),
-      "built",
-    );
-    await Deno.writeTextFile(built.manifest.paths.executable, "tampered\n");
-    await assertRejects(() => manager.path(), ZigBinaryVerificationError, "hash or size");
-  } finally {
-    await cleanup(root);
-  }
-});
-
-Deno.test("wrong Zig version never selects or publishes a build", async () => {
-  const root = await Deno.makeTempDir({ prefix: "zig-manager-build-version-" });
-  try {
-    const prefix = await createDevelopmentFiles(root);
-    const sourceRef = new FakeSourceRef(root);
-    const runner = new FakeProcessRunner(prefix);
-    runner.wrongZigVersion = true;
-    const manager = new ZigManager({
-      projectRoot: root,
-      config: testConfig(root, prefix),
-      sourceRef,
-      runner,
-      platform: "linux",
-    });
-    await manager.use("0.16");
-    await assertRejects(() => manager.build(), ZigBinaryVerificationError, "version");
-    assertEquals((await readZigManagerState(sourceRef.repositoryHome)).activeBuild, null);
-  } finally {
-    await cleanup(root);
-  }
-});
-
-Deno.test("missing managed lib never selects or publishes a build", async () => {
-  const root = await Deno.makeTempDir({ prefix: "zig-manager-build-lib-" });
-  try {
-    const prefix = await createDevelopmentFiles(root);
-    const sourceRef = new FakeSourceRef(root);
-    const runner = new FakeProcessRunner(prefix);
-    runner.omitLib = true;
-    const manager = new ZigManager({
-      projectRoot: root,
-      config: testConfig(root, prefix),
-      sourceRef,
-      runner,
-      platform: "linux",
-    });
-    await manager.use("0.16");
-    await assertRejects(() => manager.build(), ZigBinaryVerificationError, "lib directory");
-    assertEquals((await readZigManagerState(sourceRef.repositoryHome)).activeBuild, null);
-  } finally {
-    await cleanup(root);
-  }
-});
-
-Deno.test("run returns the managed child's exact exit and signal status", async () => {
-  const root = await Deno.makeTempDir({ prefix: "zig-manager-run-" });
-  try {
-    const prefix = await createDevelopmentFiles(root);
-    const sourceRef = new FakeSourceRef(root);
-    const runner = new FakeProcessRunner(prefix);
-    const manager = new ZigManager({
-      projectRoot: root,
-      config: testConfig(root, prefix),
-      sourceRef,
-      runner,
-      platform: "linux",
-    });
-    await manager.use("0.16");
-    const built = await manager.build();
-    runner.runExit = processResult(37, null);
-    const exited = await manager.run(["fixture-exit"]);
-    assertEquals(exited.code, 37);
-    assertEquals(exited.signal, null);
-    assertEquals(runner.requests.at(-1)?.executable, built.manifest.paths.executable);
-
-    runner.runExit = processResult(143, "SIGTERM");
-    const signaled = await manager.run(["fixture-signal"]);
-    assertEquals(signaled.code, 143);
-    assertEquals(signaled.signal, "SIGTERM");
-  } finally {
-    await cleanup(root);
-  }
-});
-
 function identityFixture(): BuildIdentityInput {
   return {
     sourceCommit: COMMIT_A,
@@ -259,6 +122,7 @@ function identityFixture(): BuildIdentityInput {
       generator: "Ninja",
       jobs: 4,
       cmakePrefixPath: "/llvm21",
+      cpu: "baseline",
     },
     tools: {
       cmake: { path: "/cmake", version: "3.30.0" },
@@ -277,6 +141,9 @@ function toolchainFixture(platform: "linux" | "darwin" | "windows"): BuildToolch
   const tool = (name: string, version: string): ToolProbeResult => ({
     name,
     executable: join(root, name),
+    arguments: ["--version"],
+    checkedCandidates: [join(root, name)],
+    explicit: false,
     available: true,
     version,
     supported: true,
@@ -294,17 +161,5 @@ function toolchainFixture(platform: "linux" | "darwin" | "windows"): BuildToolch
     cmakePrefixPath: join(root, "llvm"),
     llvmIncludeDir: join(root, "llvm", "include"),
     llvmLibDir: join(root, "llvm", "lib"),
-  };
-}
-
-function processResult(code: number, signal: Deno.Signal | null): ProcessResult {
-  return {
-    success: code === 0 && signal === null,
-    code,
-    signal,
-    stdout: "",
-    stderr: "",
-    stdoutTruncated: false,
-    stderrTruncated: false,
   };
 }

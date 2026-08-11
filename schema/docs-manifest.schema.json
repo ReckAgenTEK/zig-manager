@@ -156,7 +156,8 @@
         "executable",
         "args",
         "cwd",
-        "env"
+        "env",
+        "clearEnv"
       ],
       "properties": {
         "executable": {
@@ -178,6 +179,9 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "clearEnv": {
+          "const": true
         }
       }
     },

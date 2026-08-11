@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jsr.io/@zignado/zig-manager/build-recipe-v1.schema.json",
+  "title": "zig-manager canonical component build recipe v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "component",
+    "source",
+    "adapter",
+    "host",
+    "cpuPolicy",
+    "build",
+    "cmake",
+    "environment",
+    "tools",
+    "development",
+    "dependencies"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "component": { "enum": ["zig", "zls"] },
+    "source": { "$ref": "#/$defs/source" },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "buildContractVersion", "verifierContractVersion"],
+      "properties": {
+        "id": { "$ref": "#/$defs/text" },
+        "buildContractVersion": { "$ref": "#/$defs/positiveInteger" },
+        "verifierContractVersion": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "host": { "$ref": "#/$defs/host" },
+    "cpuPolicy": { "enum": ["baseline", "native"] },
+    "build": { "$ref": "#/$defs/build" },
+    "cmake": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configureArguments", "buildArguments"],
+      "properties": {
+        "configureArguments": { "$ref": "#/$defs/arguments" },
+        "buildArguments": { "$ref": "#/$defs/arguments" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clearEnv", "inherited", "variables"],
+      "properties": {
+        "clearEnv": { "const": true },
+        "inherited": { "type": "array", "maxItems": 0 },
+        "variables": { "$ref": "#/$defs/environmentVariables" }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cmake",
+        "cCompiler",
+        "cxxCompiler",
+        "llvmConfig",
+        "clang",
+        "lld",
+        "generatorTool"
+      ],
+      "properties": {
+        "cmake": { "$ref": "#/$defs/tool" },
+        "cCompiler": { "$ref": "#/$defs/tool" },
+        "cxxCompiler": { "$ref": "#/$defs/tool" },
+        "llvmConfig": { "$ref": "#/$defs/tool" },
+        "clang": { "$ref": "#/$defs/tool" },
+        "lld": { "$ref": "#/$defs/tool" },
+        "generatorTool": { "$ref": "#/$defs/tool" }
+      }
+    },
+    "development": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "packages"],
+      "properties": {
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/fileFingerprint" }
+        },
+        "packages": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/packageFingerprint" }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/dependency" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "component": { "const": "zig" } }, "required": ["component"] },
+      "then": { "properties": { "dependencies": { "maxItems": 0 } } },
+      "else": { "properties": { "dependencies": { "minItems": 1, "maxItems": 1 } } }
+    }
+  ],
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "commit": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "plainString": { "type": "string", "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$" },
+    "queryOutput": {
+      "type": "string",
+      "pattern": "^[^\\u0000\\u0001-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f]*$"
+    },
+    "positiveInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "absolutePath": { "type": "string", "pattern": "^/[^\\u0000-\\u001f\\u007f-\\u009f]*$" },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "url"],
+      "properties": {
+        "identity": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]{0,127}$" },
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" }
+      }
+    },
+    "sourceVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "base",
+        "text",
+        "taggedAncestor",
+        "commitsAfterTag",
+        "commitAbbreviation"
+      ],
+      "properties": {
+        "kind": { "enum": ["release", "development"] },
+        "base": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "text": { "$ref": "#/$defs/text" },
+        "taggedAncestor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "commitsAfterTag": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "commitAbbreviation": { "type": "string", "pattern": "^[0-9a-f]{4,64}$" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit", "version"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/repository" },
+        "commit": { "$ref": "#/$defs/commit" },
+        "version": { "$ref": "#/$defs/sourceVersion" }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture", "abi", "denoTarget"],
+      "properties": {
+        "os": { "$ref": "#/$defs/text" },
+        "architecture": { "$ref": "#/$defs/text" },
+        "abi": { "$ref": "#/$defs/text" },
+        "denoTarget": { "$ref": "#/$defs/text" }
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy",
+        "profile",
+        "cmakeBuildType",
+        "generator",
+        "jobs",
+        "cmakePrefixPath",
+        "cpu"
+      ],
+      "properties": {
+        "strategy": { "const": "cmake" },
+        "profile": { "enum": ["debug", "release", "relwithdebinfo", "minsizerel"] },
+        "cmakeBuildType": { "enum": ["Debug", "Release", "RelWithDebInfo", "MinSizeRel"] },
+        "generator": { "$ref": "#/$defs/text" },
+        "jobs": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/positiveInteger" }] },
+        "cmakePrefixPath": { "$ref": "#/$defs/absolutePath" },
+        "cpu": { "enum": ["baseline", "native"] }
+      }
+    },
+    "arguments": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/plainString" }
+    },
+    "environmentVariables": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "LIBRARY_PATH",
+        "CMAKE_PREFIX_PATH",
+        "PKG_CONFIG_PATH",
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "ZIG_GLOBAL_CACHE_DIR",
+        "ZIG_LOCAL_CACHE_DIR"
+      ],
+      "properties": {
+        "CFLAGS": { "const": "" },
+        "CXXFLAGS": { "const": "" },
+        "CPPFLAGS": { "const": "" },
+        "LDFLAGS": { "const": "" },
+        "CPATH": { "const": "" },
+        "C_INCLUDE_PATH": { "const": "" },
+        "CPLUS_INCLUDE_PATH": { "const": "" },
+        "LIBRARY_PATH": { "const": "" },
+        "CMAKE_PREFIX_PATH": { "const": "" },
+        "PKG_CONFIG_PATH": { "const": "" },
+        "LANG": { "const": "C" },
+        "LC_ALL": { "const": "C" },
+        "PATH": { "$ref": "#/$defs/text" },
+        "HOME": { "const": "$BUILD/home" },
+        "TMPDIR": { "const": "$BUILD/tmp" },
+        "XDG_CACHE_HOME": { "const": "$BUILD/cache/xdg" },
+        "ZIG_GLOBAL_CACHE_DIR": { "const": "$BUILD/cache/zig-global" },
+        "ZIG_LOCAL_CACHE_DIR": { "const": "$BUILD/cache/zig-local" }
+      }
+    },
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["args", "stdout", "stderr"],
+      "properties": {
+        "args": { "type": "array", "items": { "$ref": "#/$defs/plainString" } },
+        "stdout": { "$ref": "#/$defs/queryOutput" },
+        "stderr": { "$ref": "#/$defs/queryOutput" }
+      }
+    },
+    "fileFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "size": { "$ref": "#/$defs/positiveInteger" },
+        "sha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "version", "size", "sha256", "queries"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "version": { "$ref": "#/$defs/text" },
+        "size": { "$ref": "#/$defs/positiveInteger" },
+        "sha256": { "$ref": "#/$defs/hash" },
+        "queries": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/query" } }
+      }
+    },
+    "packageFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "query"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9@._+-]*$" },
+        "version": { "$ref": "#/$defs/text" },
+        "query": { "$ref": "#/$defs/query" }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "installationId"],
+      "properties": {
+        "component": { "const": "zig" },
+        "installationId": { "$ref": "#/$defs/hash" }
+      }
+    }
+  }
+}

@@ -1,16 +1,19 @@
 import { LockedRequestMismatchError, RepositoryNotFoundError } from "@source-ref/source-ref";
 import { dirname, join } from "@std/path";
+import { ZigOperationAbortedError } from "../src/errors.ts";
 import type {
   CheckoutResult,
   ProcessRequest,
   ProcessResult,
   ProcessRunner,
+  RemoteHead,
   RemoteRef,
   RepositoryStatus,
   RevisionDescription,
   SourceRefApi,
   SourceRefDoctorResult,
   ZigManagerConfig,
+  ZigSourceVersion,
 } from "../src/mod.ts";
 
 export const COMMIT_A = "a".repeat(40);
@@ -60,7 +63,61 @@ export async function createDevelopmentFiles(root: string): Promise<string> {
   for (const name of ["libLLVM.so", "libclang-cpp.so", "liblldCommon.a"]) {
     await Deno.writeTextFile(join(prefix, "lib", name), "fixture\n");
   }
+  await Deno.mkdir(join(root, "tools"), { recursive: true });
+  for (const name of ["cmake", "cc", "c++", "llvm-config", "clang", "ld.lld", "ninja"]) {
+    const path = join(root, "tools", name);
+    await Deno.writeTextFile(path, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    if (Deno.build.os !== "windows") await Deno.chmod(path, 0o755);
+  }
   return prefix;
+}
+
+export function zigVersionMetadata(commit: string, version: string): ZigSourceVersion {
+  return {
+    kind: "release",
+    base: version,
+    text: version,
+    taggedAncestor: version,
+    commitsAfterTag: 0,
+    commitAbbreviation: commit.slice(0, 9),
+  };
+}
+
+export function elf64X86_64Fixture(interpreter: string | null = null): Uint8Array {
+  const interpreterBytes = interpreter === null
+    ? null
+    : new TextEncoder().encode(`${interpreter}\0`);
+  const programHeaderCount = interpreterBytes === null ? 0 : 2;
+  const interpreterOffset = 64 + programHeaderCount * 56;
+  const bytes = new Uint8Array(interpreterOffset + (interpreterBytes?.length ?? 0));
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(16, 2, true);
+  view.setUint16(18, 62, true);
+  view.setUint32(20, 1, true);
+  if (programHeaderCount > 0) view.setBigUint64(32, 64n, true);
+  view.setUint16(52, 64, true);
+  view.setUint16(54, 56, true);
+  view.setUint16(56, programHeaderCount, true);
+  if (interpreterBytes !== null) {
+    const interpreterHeader = new DataView(bytes.buffer, 64, 56);
+    interpreterHeader.setUint32(0, 3, true);
+    interpreterHeader.setBigUint64(8, BigInt(interpreterOffset), true);
+    interpreterHeader.setBigUint64(32, BigInt(interpreterBytes.length), true);
+    const dynamicHeader = new DataView(bytes.buffer, 120, 56);
+    dynamicHeader.setUint32(0, 2, true);
+    bytes.set(interpreterBytes, interpreterOffset);
+  }
+  return bytes;
+}
+
+export async function writeElf64X86_64(
+  path: string,
+  mode = 0o755,
+  interpreter: string | null = null,
+): Promise<void> {
+  await Deno.writeFile(path, elf64X86_64Fixture(interpreter), { mode });
+  if (Deno.build.os !== "windows") await Deno.chmod(path, mode);
 }
 
 export class FakeSourceRef implements SourceRefApi {
@@ -74,6 +131,7 @@ export class FakeSourceRef implements SourceRefApi {
     { kind: "branch", name: "master", commit: COMMIT_B },
   ];
   failRemote = false;
+  head: RemoteHead = { branch: "master", commit: COMMIT_B };
   dirty = false;
   locked: { ref: CheckoutResult["requested"]; commit: string } | null = null;
   readonly versions = new Map<string, { base: string; tag: string; distance: number }>([
@@ -82,10 +140,16 @@ export class FakeSourceRef implements SourceRefApi {
     [COMMIT_C, { base: "0.15.2", tag: "0.15.2", distance: 0 }],
   ]);
 
-  constructor(projectRoot: string) {
-    this.root = join(projectRoot, ".source-ref");
+  constructor(projectRoot: string, sourceRoot = join(projectRoot, ".source-ref")) {
+    this.root = sourceRoot;
     this.repositoryHome = join(this.root, "codeberg", "zig");
     this.checkoutPath = join(this.repositoryHome, "git-src");
+  }
+
+  resolveRemoteHead(): Promise<RemoteHead> {
+    this.calls.push("resolveRemoteHead");
+    if (this.failRemote) return Promise.reject(new Error("remote unavailable"));
+    return Promise.resolve({ ...this.head });
   }
 
   listRemoteRefs(request: { readonly kind?: "tag" | "branch" }): Promise<RemoteRef[]> {
@@ -239,6 +303,8 @@ export class FakeProcessRunner implements ProcessRunner {
   omitDocsAsset: string | null = null;
   docsStarted: (() => void) | null = null;
   docsGate: Promise<void> | null = null;
+  buildStarted: (() => void) | null = null;
+  buildGate: Promise<void> | null = null;
   llvmTargets =
     "AArch64 AMDGPU ARM AVR BPF Hexagon Lanai LoongArch Mips MSP430 NVPTX PowerPC RISCV SPIRV Sparc SystemZ VE WebAssembly X86 XCore";
   toolVersions: Partial<Record<"cmake" | "llvm" | "clang" | "lld", string>> = {};
@@ -265,8 +331,18 @@ export class FakeProcessRunner implements ProcessRunner {
       const install = dirname(dirname(executable));
       return await this.result(
         request,
-        `.{\n    .lib_dir = ${JSON.stringify(join(install, "lib", "zig"))},\n}\n`,
+        `.{\n    .lib_dir = ${
+          JSON.stringify(join(install, "lib", "zig"))
+        },\n    .target = "x86_64-unknown-linux-gnu",\n}\n`,
       );
+    }
+    if (request.args[0] === "build-exe" && /zig(?:\.exe)?$/.test(name)) {
+      const output = request.args.find((arg) => arg.startsWith("-femit-bin="))?.slice(
+        "-femit-bin=".length,
+      );
+      if (output === undefined) throw new Error("fake compile omitted output path");
+      await writeElf64X86_64(output);
+      return await this.result(request, "compiled\n");
     }
     if (docsArgs[0] === "build" && docsArgs[1] === "docs" && /zig(?:\.exe)?$/.test(docsName)) {
       this.docsStarted?.();
@@ -293,6 +369,9 @@ export class FakeProcessRunner implements ProcessRunner {
       }
       return await this.result(request, `${name} version 15.0.0\n`);
     }
+    if (executable === "/usr/bin/pacman" && request.args[0] === "-Q") {
+      return await this.result(request, `${request.args[1]} 21.1.0-1\n`);
+    }
     if (request.args[0] === "--help" && name.includes("cmake")) {
       return await this.result(request, "Generators\n  Ninja = Generates build.ninja files.\n");
     }
@@ -316,11 +395,18 @@ export class FakeProcessRunner implements ProcessRunner {
       return await this.result(request, "configured\n");
     }
     if (name.includes("cmake") && request.args[0] === "--build") {
+      this.buildStarted?.();
+      if (this.buildGate !== null) await this.buildGate;
+      if (request.signal?.aborted) {
+        throw new ZigOperationAbortedError("fake CMake build", {}, {
+          cause: request.signal.reason,
+        });
+      }
       const install = this.#installs.get(request.args[1]);
       if (!install) throw new Error("fake build has no configure record");
       const executablePath = join(install, "bin", Deno.build.os === "windows" ? "zig.exe" : "zig");
       await Deno.mkdir(dirname(executablePath), { recursive: true });
-      await Deno.writeTextFile(executablePath, "synthetic managed zig\n");
+      await writeElf64X86_64(executablePath);
       if (!this.omitLib) {
         await Deno.mkdir(join(install, "lib", "zig", "std"), { recursive: true });
         await Deno.writeTextFile(

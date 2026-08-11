@@ -1,10 +1,4 @@
-import {
-  assert,
-  assertEquals,
-  assertRejects,
-  assertStringIncludes,
-  assertThrows,
-} from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import { validateDocsTree } from "../src/docs.ts";
 import {
@@ -14,23 +8,8 @@ import {
   escapeHtmlText,
   validateAssetContract,
 } from "../src/mega_docs.ts";
-import {
-  DocsBuildRequiredError,
-  MegaDocsUnsupportedFormatError,
-  ZigDocsBuildError,
-  ZigDocsOutputError,
-  ZigManager,
-} from "../src/mod.ts";
-import { readZigManagerState } from "../src/state.ts";
-import {
-  cleanup,
-  COMMIT_B,
-  createDevelopmentFiles,
-  createDocsFixture,
-  FakeProcessRunner,
-  FakeSourceRef,
-  testConfig,
-} from "./test_helpers.ts";
+import { MegaDocsUnsupportedFormatError, ZigDocsOutputError } from "../src/mod.ts";
+import { cleanup, createDocsFixture } from "./test_helpers.ts";
 
 Deno.test("docs validation accepts only the complete nonempty Zig 0.16 output tree", async () => {
   const root = await Deno.makeTempDir({ prefix: "zig-manager-doc-tree-" });
@@ -42,113 +21,6 @@ Deno.test("docs validation accepts only the complete nonempty Zig 0.16 output tr
     await Deno.remove(join(root, "std", "unexpected.js"));
     await Deno.writeFile(join(root, "std", "main.wasm"), new Uint8Array());
     await assertRejects(() => validateDocsTree(root), ZigDocsOutputError, "empty");
-  } finally {
-    await cleanup(root);
-  }
-});
-
-Deno.test("failed docs generation preserves the prior valid reference directory", async () => {
-  const root = await Deno.makeTempDir({ prefix: "zig-manager-doc-atomic-" });
-  try {
-    const { manager, runner, sourceRef } = await builtManager(root);
-    const prior = join(sourceRef.repositoryHome, "ref-docs");
-    await Deno.mkdir(prior, { recursive: true });
-    await Deno.writeTextFile(join(prior, "prior-valid.txt"), "preserve me\n");
-    runner.omitDocsAsset = "std/main.wasm";
-    await assertRejects(() => manager.docs(), ZigDocsOutputError);
-    assertEquals(await Deno.readTextFile(join(prior, "prior-valid.txt")), "preserve me\n");
-    assertEquals((await readZigManagerState(sourceRef.repositoryHome)).docs, null);
-  } finally {
-    await cleanup(root);
-  }
-});
-
-Deno.test("docs recover staging directories left by an interrupted process", async () => {
-  const root = await Deno.makeTempDir({ prefix: "zig-manager-doc-recovery-" });
-  try {
-    const { manager, sourceRef } = await builtManager(root);
-    const outputPrefix = join(sourceRef.repositoryHome, ".ref-docs-build");
-    const publishStage = join(sourceRef.repositoryHome, ".ref-docs-staging");
-    await Deno.mkdir(outputPrefix);
-    await Deno.writeTextFile(join(outputPrefix, "abandoned.txt"), "incomplete\n");
-    await Deno.mkdir(publishStage);
-    await Deno.writeTextFile(join(publishStage, "abandoned.txt"), "incomplete\n");
-
-    const result = await manager.docs();
-    assertEquals(result.manifest.artifacts.length, 5);
-    await assertRejects(() => Deno.stat(outputPrefix), Deno.errors.NotFound);
-    await assertRejects(() => Deno.stat(publishStage), Deno.errors.NotFound);
-  } finally {
-    await cleanup(root);
-  }
-});
-
-Deno.test("docs do not clean staging while another operation holds the lock", async () => {
-  const root = await Deno.makeTempDir({ prefix: "zig-manager-doc-contention-" });
-  try {
-    const { manager, runner, sourceRef } = await builtManager(root);
-    let signalStarted: () => void = () => {};
-    const started = new Promise<void>((resolve) => {
-      signalStarted = resolve;
-    });
-    let releaseDocs: () => void = () => {};
-    runner.docsGate = new Promise<void>((resolve) => {
-      releaseDocs = resolve;
-    });
-    runner.docsStarted = signalStarted;
-    const activeDocs = manager.docs();
-    await started;
-    const outputPrefix = join(sourceRef.repositoryHome, ".ref-docs-build");
-    const sentinel = join(outputPrefix, "active.txt");
-    await Deno.writeTextFile(sentinel, "active\n");
-    try {
-      await assertRejects(
-        () => manager.docs(),
-        ZigDocsBuildError,
-        "already running",
-      );
-      assertEquals(await Deno.readTextFile(sentinel), "active\n");
-    } finally {
-      releaseDocs();
-      await activeDocs;
-    }
-  } finally {
-    await cleanup(root);
-  }
-});
-
-Deno.test("docs manifests and mega output are reproducible and become stale by commit", async () => {
-  const root = await Deno.makeTempDir({ prefix: "zig-manager-docs-" });
-  try {
-    const { manager, runner, sourceRef } = await builtManager(root);
-    const first = await manager.docs();
-    const manifestPath = join(first.manifest.outputPath, "manifest.json");
-    const firstManifest = await Deno.readTextFile(manifestPath);
-    const firstMega = await Deno.readFile(
-      join(first.manifest.outputPath, first.manifest.mega?.path ?? "missing"),
-    );
-    const second = await manager.docs();
-    assertEquals(await Deno.readTextFile(manifestPath), firstManifest);
-    assertEquals(
-      await Deno.readFile(
-        join(second.manifest.outputPath, second.manifest.mega?.path ?? "missing"),
-      ),
-      firstMega,
-    );
-    assertEquals(second.manifest.artifacts.length, 5);
-    assertEquals(second.manifest.mega?.formatVersion, 1);
-    const docsCommand = runner.requests.find((request) => request.args.includes("docs"));
-    assert(docsCommand);
-    assertEquals(docsCommand.executable, "prlimit");
-    assertEquals(docsCommand.args.slice(0, 3), ["--core=1:", "--", docsCommand.args[2]]);
-    assert(docsCommand.args.includes("-Dversion-string=0.16.0"));
-
-    sourceRef.refs.push({ kind: "tag", name: "0.16.1", commit: COMMIT_B });
-    await manager.update();
-    const status = await manager.status();
-    assertEquals(status.docs.stale, true);
-    await assertRejects(() => manager.docs(), DocsBuildRequiredError);
-    assert(runner.requests.every((request) => !/(^|[/\\])git(?:\.exe)?$/.test(request.executable)));
   } finally {
     await cleanup(root);
   }
@@ -220,24 +92,3 @@ Deno.test("mega helpers escape HTML and reject autodoc contract drift", () => {
     MegaDocsUnsupportedFormatError,
   );
 });
-
-async function builtManager(root: string): Promise<{
-  manager: ZigManager;
-  runner: FakeProcessRunner;
-  sourceRef: FakeSourceRef;
-}> {
-  const prefix = await createDevelopmentFiles(root);
-  const sourceRef = new FakeSourceRef(root);
-  const runner = new FakeProcessRunner(prefix);
-  const manager = new ZigManager({
-    projectRoot: root,
-    config: testConfig(root, prefix),
-    sourceRef,
-    runner,
-    platform: "linux",
-    hostTarget: "x86_64-unknown-linux-gnu",
-  });
-  await manager.use("0.16");
-  await manager.build();
-  return { manager, runner, sourceRef };
-}

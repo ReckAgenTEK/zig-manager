@@ -320,7 +320,7 @@ const SELECTION_STATE_EXPRESSION = `(() => {
 })()`;
 
 Deno.test({
-  name: "opt-in real network/build/docs end-to-end workflow",
+  name: "opt-in real Arch latest install and directory-pin workflow",
   ignore: Deno.env.get("ZIG_MANAGER_E2E") !== "1",
   sanitizeOps: false,
   sanitizeResources: false,
@@ -329,7 +329,7 @@ Deno.test({
     if (!projectRoot) {
       throw new Error("ZIG_MANAGER_E2E_PROJECT_ROOT is required for the opt-in E2E test");
     }
-    await new ZigManager({ projectRoot }).setup();
+    await new ZigManager({ cwd: projectRoot }).use("latest");
   },
 });
 

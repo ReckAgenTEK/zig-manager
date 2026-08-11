@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jsr.io/@zignado/zig-manager/catalog-v3.schema.json",
+  "title": "zig-manager rebuildable catalog v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "installations",
+    "profiles"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "generatedAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "installations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/installation"
+      }
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/profile"
+      }
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{3})?Z$"
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "installationId"
+      ],
+      "properties": {
+        "component": {
+          "const": "zig"
+        },
+        "installationId": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "installationId",
+        "version",
+        "commit",
+        "createdAt",
+        "dependencies"
+      ],
+      "properties": {
+        "component": {
+          "enum": [
+            "zig",
+            "zls"
+          ]
+        },
+        "installationId": {
+          "$ref": "#/$defs/hash"
+        },
+        "version": {
+          "$ref": "#/$defs/text"
+        },
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependency"
+          }
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileId",
+        "requestedSelector",
+        "resolvedCommit",
+        "zigInstallationId",
+        "zlsInstallationId",
+        "createdAt"
+      ],
+      "properties": {
+        "profileId": {
+          "$ref": "#/$defs/hash"
+        },
+        "requestedSelector": {
+          "$ref": "#/$defs/text"
+        },
+        "resolvedCommit": {
+          "$ref": "#/$defs/commit"
+        },
+        "zigInstallationId": {
+          "$ref": "#/$defs/hash"
+        },
+        "zlsInstallationId": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/hash"
+            }
+          ]
+        },
+        "createdAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    }
+  }
+}

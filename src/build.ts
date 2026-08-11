@@ -1,6 +1,7 @@
-import { basename, join, relative, resolve } from "@std/path";
+import { basename, dirname, join, relative, resolve } from "@std/path";
 import { join as windowsJoin } from "@std/path/windows";
 import { BUILD_MANIFEST_FILE } from "./constants.ts";
+import { validateZigBuildRecipe, type ZigBuildRecipeV1 } from "./build_recipe.ts";
 import {
   BuildManifestValidationError,
   ZigBinaryVerificationError,
@@ -9,14 +10,13 @@ import {
 } from "./errors.ts";
 import {
   assertPathContained,
-  atomicReplaceDirectory,
   canonicalJson,
   fileMetadata,
   pathExists,
-  removeIfPresent,
   sha256Text,
 } from "./filesystem.ts";
-import { readBuildManifest, toolIdentity, writeBuildManifest } from "./manifest.ts";
+import { readBuildManifest, writeBuildManifest } from "./manifest.ts";
+import { computeInstallationId } from "./install_store.ts";
 import type { ReleaseAdapter } from "./release_adapter.ts";
 import type {
   BuildArtifactPaths,
@@ -32,6 +32,14 @@ import type {
 
 export interface ManagedBuildContext {
   readonly repositoryHome: string;
+  /** Optional global cache root; buildParent creates its builds/ child. */
+  readonly buildRoot?: string;
+  /** Durable command-log root, normally the manager cache logs directory. */
+  readonly logRoot?: string;
+  /** Transaction UUID shared with locks and later install/profile staging. */
+  readonly operationId?: string;
+  readonly recipe: ZigBuildRecipeV1;
+  readonly installationId: string;
   readonly source: SourceSelectionState;
   readonly doctor: ZigDoctorResult;
   readonly adapter: ReleaseAdapter;
@@ -43,60 +51,68 @@ export interface ManagedBuildContext {
   readonly progress: (message: string) => void | Promise<void>;
 }
 
+const OPERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const INSTALLATION_ID = /^[0-9a-f]{64}$/;
+
 export async function buildManagedZig(context: ManagedBuildContext): Promise<BuildResult> {
+  throwIfAborted(context.options.signal, "build managed Zig");
+  const operationId = operationUuid(context.operationId ?? crypto.randomUUID());
   const version = context.source.version;
-  const normalized = context.adapter.normalizeBuildOptions(
-    context.config,
-    context.options.profile,
-    context.options.jobs,
-    context.doctor.toolchain.cmakePrefixPath,
-  );
-  const identityInput: BuildIdentityInput = {
-    sourceCommit: context.source.commit,
-    hostTarget: context.hostTarget,
-    options: normalized,
-    tools: {
-      cmake: toolIdentity(context.doctor.toolchain.cmake),
-      cCompiler: toolIdentity(context.doctor.toolchain.cCompiler),
-      cxxCompiler: toolIdentity(context.doctor.toolchain.cxxCompiler),
-      llvmConfig: toolIdentity(context.doctor.toolchain.llvmConfig),
-      clang: toolIdentity(context.doctor.toolchain.clang),
-      lld: toolIdentity(context.doctor.toolchain.lld),
-      generatorTool: context.doctor.toolchain.generatorTool === null
-        ? null
-        : toolIdentity(context.doctor.toolchain.generatorTool),
-    },
-  };
-  const identity = await computeBuildIdentity(identityInput);
-  const parent = buildParent(
-    context.repositoryHome,
-    context.source.commit,
-    context.hostTarget,
-    normalized.profile,
-  );
+  const recipe = validateZigBuildRecipe(context.recipe);
+  const installationId = await computeInstallationId(recipe);
+  if (installationId !== context.installationId) {
+    throw new TypeError("build installation ID must equal the canonical recipe hash");
+  }
+  if (
+    recipe.component !== "zig" || recipe.source.commit !== context.source.commit ||
+    canonicalJson(recipe.source.version) !== canonicalJson(version) ||
+    recipe.adapter.id !== context.adapter.id
+  ) throw new TypeError("build context does not match its canonical recipe");
+  const identityInput = buildIdentityFromRecipe(recipe);
+  const identity = installationId;
+  const buildRoot = resolve(context.buildRoot ?? join(context.repositoryHome, "builds"));
+  const parent = join(buildRoot, "zig");
+  const stagingParent = buildStagingRoot(buildRoot);
   const finalRoot = join(parent, identity);
   const finalManifestPath = join(finalRoot, BUILD_MANIFEST_FILE);
-  if (await pathExists(finalManifestPath)) {
-    const manifest = await readBuildManifest(finalManifestPath);
-    await verifyBuildManifest(
-      manifest,
-      context.runner,
-      context.adapter,
-      context.platform,
-      identity,
-      context.options.signal,
-    );
-    return { manifest, reused: true };
+  const operationRoot = join(stagingParent, operationId);
+  const stagingRoot = join(operationRoot, identity);
+  const logsBase = resolve(context.logRoot ?? join(dirname(buildRoot), "logs"));
+  const logRoot = join(logsBase, operationId, "zig", identity);
+  assertBuildStagingOwnership(stagingParent, operationRoot, stagingRoot, operationId, identity);
+  assertLogOwnership(logsBase, logRoot, operationId, identity);
+  await ensurePhysicalBuildParent(parent);
+  throwIfAborted(context.options.signal, "build managed Zig");
+  if (await pathExists(finalRoot)) {
+    try {
+      const manifest = await readBuildManifest(finalManifestPath);
+      await verifyBuildManifest(
+        manifest,
+        context.runner,
+        context.adapter,
+        context.platform,
+        identity,
+        context.options.signal,
+      );
+      throwIfAborted(context.options.signal, "reuse managed Zig build");
+      return { manifest, reused: true };
+    } catch (cause) {
+      if (context.options.signal?.aborted || cause instanceof ZigOperationAbortedError) throw cause;
+      await removeReplaceableBuildObject(parent, finalRoot, context.options.signal);
+    }
   }
 
-  await Deno.mkdir(parent, { recursive: true });
-  const stagingRoot = join(parent, `.${identity}.staging`);
+  await ensurePhysicalBuildParent(stagingParent);
+  let operationRootCreated = false;
   try {
+    await Deno.mkdir(operationRoot);
+    operationRootCreated = true;
     await Deno.mkdir(stagingRoot);
   } catch (cause) {
+    if (operationRootCreated) await removeEmptyDirectory(operationRoot);
     throw new ZigBuildError(
       "A deterministic build staging directory already exists",
-      { stagingRoot },
+      { stagingRoot, operationId, logRoot },
       { cause },
     );
   }
@@ -108,24 +124,26 @@ export async function buildManagedZig(context: ManagedBuildContext): Promise<Bui
       Deno.mkdir(stagingPaths.install, { recursive: true }),
       Deno.mkdir(stagingPaths.cache, { recursive: true }),
       Deno.mkdir(stagingPaths.logs, { recursive: true }),
+      Deno.mkdir(join(stagingRoot, "home"), { recursive: true }),
+      Deno.mkdir(join(stagingRoot, "tmp"), { recursive: true }),
+      Deno.mkdir(join(stagingPaths.cache, "xdg"), { recursive: true }),
+      Deno.mkdir(join(stagingPaths.cache, "zig-global"), { recursive: true }),
+      Deno.mkdir(join(stagingPaths.cache, "zig-local"), { recursive: true }),
     ]);
-    const commands = context.adapter.createBuildCommands({
-      platform: context.platform,
-      sourcePath: context.source.checkoutPath,
-      version,
-      paths: stagingPaths,
-      options: normalized,
-      toolchain: context.doctor.toolchain,
-    });
+    throwIfAborted(context.options.signal, "prepare managed Zig build staging");
+    await createDurableLogRoot(logsBase, logRoot, operationId, identity);
+    await context.progress(`Build logs: ${logRoot}\n`);
+    const commands = instantiateRecipeCommands(recipe, context.source.checkoutPath, stagingPaths);
     for (let index = 0; index < commands.length; index++) {
       await executeLoggedCommand(
         context.runner,
         commands[index],
-        stagingPaths.logs,
+        logRoot,
         index === 0 ? "configure" : "build",
         context.progress,
         context.options.signal,
       );
+      throwIfAborted(context.options.signal, "build managed Zig");
     }
     const stagedExecutable = await locateExecutable(
       context.adapter,
@@ -141,10 +159,11 @@ export async function buildManagedZig(context: ManagedBuildContext): Promise<Bui
     );
     const finalExecutable = relocate(stagedExecutable, stagingRoot, finalRoot);
     const finalLib = relocate(verified.lib, stagingRoot, finalRoot);
-    const metadata = await fileMetadata(stagedExecutable);
+    const metadata = await fileMetadata(stagedExecutable, context.options.signal);
     const manifest: BuildManifest = {
       schemaVersion: 2,
       identity,
+      recipe,
       source: {
         selector: context.source.selector,
         version,
@@ -153,22 +172,35 @@ export async function buildManagedZig(context: ManagedBuildContext): Promise<Bui
       hostTarget: context.hostTarget,
       configuration: identityInput,
       paths: { ...finalPaths, executable: finalExecutable, lib: finalLib },
-      commands,
+      commands: relocateCommandRecords(commands, stagingRoot, finalRoot),
       compiler: { version: verified.version, sha256: metadata.sha256, size: metadata.size },
       verified: true,
     };
     await writeBuildManifest(join(stagingRoot, BUILD_MANIFEST_FILE), manifest);
-    await atomicReplaceDirectory(stagingRoot, finalRoot);
+    throwIfAborted(context.options.signal, "promote managed Zig build");
+    await Deno.rename(stagingRoot, finalRoot);
+    await removeEmptyDirectory(operationRoot);
     return { manifest, reused: false };
   } catch (cause) {
-    await removeIfPresent(stagingRoot, true);
-    if (context.options.signal?.aborted) throw new ZigOperationAbortedError("build");
-    if (
-      cause instanceof ZigBuildError || cause instanceof ZigBinaryVerificationError ||
-      cause instanceof ZigOperationAbortedError
-    ) throw cause;
-    throw new ZigBuildError("Managed Zig build failed", { stagingRoot }, { cause });
+    await cleanupOwnedBuildStaging(
+      stagingParent,
+      operationRoot,
+      stagingRoot,
+      operationId,
+      identity,
+      cause,
+    );
+    try {
+      await context.progress(`Build logs retained at ${logRoot}\n`);
+    } catch {
+      // Progress reporting must not replace the build failure.
+    }
+    throw buildFailureWithLogs(cause, context.options.signal, stagingRoot, logRoot);
   }
+}
+
+export function buildStagingRoot(buildRoot: string): string {
+  return join(resolve(buildRoot), "zig", ".staging");
 }
 
 export async function computeBuildIdentity(input: BuildIdentityInput): Promise<string> {
@@ -216,26 +248,60 @@ export async function verifyBuildManifest(
   expectedIdentity?: string,
   signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal, "verify managed Zig build");
   if (expectedIdentity !== undefined && manifest.identity !== expectedIdentity) {
     throw new BuildManifestValidationError(
       manifest.paths.root,
       "build identity does not match requested configuration",
     );
   }
-  const computedIdentity = await computeBuildIdentity(manifest.configuration);
+  const computedIdentity = await computeInstallationId(manifest.recipe);
+  throwIfAborted(signal, "verify managed Zig build");
   if (computedIdentity !== manifest.identity) {
     throw new BuildManifestValidationError(
       manifest.paths.root,
-      "build identity does not match the normalized configuration",
+      "build identity does not match the canonical recipe",
+    );
+  }
+  if (
+    manifest.recipe.adapter.id !== adapter.id ||
+    manifest.recipe.adapter.buildContractVersion !== adapter.buildContractVersion ||
+    manifest.recipe.adapter.verifierContractVersion !== adapter.verifierContractVersion
+  ) {
+    throw new BuildManifestValidationError(
+      manifest.paths.root,
+      "build recipe adapter contract does not match the selected adapter",
     );
   }
   if (
     manifest.configuration.sourceCommit !== manifest.source.commit ||
-    manifest.configuration.hostTarget !== manifest.hostTarget
+    manifest.configuration.hostTarget !== manifest.hostTarget ||
+    manifest.recipe.source.commit !== manifest.source.commit ||
+    manifest.recipe.host.denoTarget !== manifest.hostTarget
   ) {
     throw new BuildManifestValidationError(
       manifest.paths.root,
       "manifest source or host does not match its normalized configuration",
+    );
+  }
+  if (
+    canonicalJson(manifest.configuration) !==
+      canonicalJson(buildIdentityFromRecipe(manifest.recipe))
+  ) {
+    throw new BuildManifestValidationError(
+      manifest.paths.root,
+      "build configuration does not match the canonical recipe",
+    );
+  }
+  const commandSource = manifest.commands[0]?.cwd;
+  if (
+    commandSource === undefined ||
+    canonicalJson(manifest.commands) !==
+      canonicalJson(instantiateRecipeCommands(manifest.recipe, commandSource, manifest.paths))
+  ) {
+    throw new BuildManifestValidationError(
+      manifest.paths.root,
+      "build commands do not match the canonical recipe and final cache paths",
     );
   }
   for (
@@ -250,7 +316,7 @@ export async function verifyBuildManifest(
   ) assertPathContained(manifest.paths.root, path);
   assertPathContained(manifest.paths.install, manifest.paths.executable);
   assertPathContained(manifest.paths.install, manifest.paths.lib);
-  const metadata = await fileMetadata(manifest.paths.executable);
+  const metadata = await fileMetadata(manifest.paths.executable, signal);
   if (metadata.sha256 !== manifest.compiler.sha256 || metadata.size !== manifest.compiler.size) {
     throw new ZigBinaryVerificationError("compiler hash or size differs from its manifest", {
       executable: manifest.paths.executable,
@@ -263,6 +329,7 @@ export async function verifyBuildManifest(
     runner,
     signal,
   );
+  throwIfAborted(signal, "verify managed Zig build");
   if (
     verified.version !== manifest.compiler.version ||
     resolve(verified.lib) !== resolve(manifest.paths.lib)
@@ -288,13 +355,22 @@ async function executeLoggedCommand(
   const stdoutPath = join(logs, `${name}.stdout.log`);
   const stderrPath = join(logs, `${name}.stderr.log`);
   const commandPath = join(logs, `${name}.command.json`);
-  await Deno.writeTextFile(commandPath, `${canonicalJson(command, 2)}\n`, { createNew: true });
+  throwIfAborted(signal, `build ${name}`);
+  await writeSyncedTextFile(commandPath, `${canonicalJson(command, 2)}\n`);
   const stdout = await Deno.open(stdoutPath, { createNew: true, write: true });
-  const stderr = await Deno.open(stderrPath, { createNew: true, write: true });
+  let stderr: Deno.FsFile;
+  try {
+    stderr = await Deno.open(stderrPath, { createNew: true, write: true });
+  } catch (cause) {
+    stdout.close();
+    throw cause;
+  }
   const stdoutDecoder = new TextDecoder();
   const stderrDecoder = new TextDecoder();
-  await progress(`Running ${basename(command.executable)} ${name}...\n`);
+  let failed = false;
+  let failure: unknown;
   try {
+    await progress(`Running ${basename(command.executable)} ${name}...\n`);
     const result = await runner.run({
       ...command,
       signal,
@@ -309,9 +385,11 @@ async function executeLoggedCommand(
         if (text.length > 0) await progress(text);
       },
     });
-    await Promise.all([stdout.sync(), stderr.sync()]);
+    throwIfAborted(signal, `build ${name}`);
     if (signal?.aborted || result.signal !== null) {
-      throw new ZigOperationAbortedError(`build ${name}`);
+      throw new ZigOperationAbortedError(`build ${name}`, { logRoot: logs }, {
+        cause: signal?.reason ?? result.signal,
+      });
     }
     if (!result.success) {
       throw new ZigBuildError(`CMake ${name} failed`, {
@@ -320,12 +398,27 @@ async function executeLoggedCommand(
         exitCode: result.code,
         stderr: result.stderr,
         stderrTruncated: result.stderrTruncated,
+        logRoot: logs,
       });
     }
+  } catch (cause) {
+    failed = true;
+    failure = cause;
   } finally {
+    const sync = await Promise.allSettled([stdout.sync(), stderr.sync()]);
     stdout.close();
     stderr.close();
+    if (!failed) {
+      const rejected = sync.find((result) => result.status === "rejected");
+      if (rejected?.status === "rejected") {
+        failed = true;
+        failure = new ZigBuildError("Build logs could not be flushed", { logRoot: logs }, {
+          cause: rejected.reason,
+        });
+      }
+    }
   }
+  if (failed) throw failure;
 }
 
 async function locateExecutable(
@@ -348,7 +441,29 @@ async function verifyExecutable(
   runner: ProcessRunner,
   signal?: AbortSignal,
 ): Promise<{ version: string; lib: string }> {
-  const versionResult = await runner.run({ executable, args: ["version"], signal });
+  throwIfAborted(signal, "verify built Zig executable");
+  const verifyRoot = join(dirname(install), "cache", "build-verification");
+  await Deno.mkdir(verifyRoot, { recursive: true });
+  const verificationEnv = {
+    LANG: "C",
+    LC_ALL: "C",
+    PATH: dirname(executable),
+    HOME: join(verifyRoot, "home"),
+    TMPDIR: join(verifyRoot, "tmp"),
+    ZIG_LOCAL_CACHE_DIR: join(verifyRoot, "local"),
+    ZIG_GLOBAL_CACHE_DIR: join(verifyRoot, "global"),
+  };
+  await Promise.all(
+    Object.values(verificationEnv).slice(3).map((path) => Deno.mkdir(path, { recursive: true })),
+  );
+  const versionResult = await runner.run({
+    executable,
+    args: ["version"],
+    clearEnv: true,
+    env: verificationEnv,
+    signal,
+  });
+  throwIfAborted(signal, "verify built Zig executable");
   if (!versionResult.success) {
     throw new ZigBinaryVerificationError("'zig version' failed", {
       executable,
@@ -363,7 +478,14 @@ async function verifyExecutable(
       actualVersion: version,
     });
   }
-  const envResult = await runner.run({ executable, args: ["env"], signal });
+  const envResult = await runner.run({
+    executable,
+    args: ["env"],
+    clearEnv: true,
+    env: verificationEnv,
+    signal,
+  });
+  throwIfAborted(signal, "verify built Zig executable");
   if (!envResult.success) {
     throw new ZigBinaryVerificationError("'zig env' failed", {
       executable,
@@ -462,7 +584,273 @@ function relocate(path: string, fromRoot: string, toRoot: string): string {
   return join(toRoot, rel);
 }
 
+function instantiateRecipeCommands(
+  recipe: ZigBuildRecipeV1,
+  sourcePath: string,
+  paths: BuildArtifactPaths,
+): readonly CommandRecord[] {
+  const replace = (value: string) =>
+    value
+      .replaceAll("$SOURCE", sourcePath)
+      .replaceAll("$BUILD", paths.root);
+  const environment: Record<string, string> = {};
+  for (const key of Object.keys(recipe.environment.variables).sort()) {
+    environment[key] = replace(recipe.environment.variables[key]);
+  }
+  return [recipe.cmake.configureArguments, recipe.cmake.buildArguments].map((args) => ({
+    executable: recipe.tools.cmake.path,
+    args: args.map(replace),
+    cwd: sourcePath,
+    env: environment,
+    clearEnv: true as const,
+  }));
+}
+
+function relocateCommandRecords(
+  commands: readonly CommandRecord[],
+  stagingRoot: string,
+  finalRoot: string,
+): readonly CommandRecord[] {
+  const relocateText = (value: string) => value.replaceAll(stagingRoot, finalRoot);
+  return commands.map((command) => ({
+    executable: command.executable,
+    args: command.args.map(relocateText),
+    cwd: relocateText(command.cwd),
+    env: Object.fromEntries(
+      Object.entries(command.env).map(([key, value]) => [key, relocateText(value)]),
+    ),
+    clearEnv: true,
+  }));
+}
+
+function recipeToolIdentity(
+  tool: ZigBuildRecipeV1["tools"]["cmake"],
+): { readonly path: string; readonly version: string } {
+  return { path: tool.path, version: tool.version };
+}
+
+function buildIdentityFromRecipe(recipe: ZigBuildRecipeV1): BuildIdentityInput {
+  return {
+    sourceCommit: recipe.source.commit,
+    hostTarget: recipe.host.denoTarget,
+    options: recipe.build,
+    tools: {
+      cmake: recipeToolIdentity(recipe.tools.cmake),
+      cCompiler: recipeToolIdentity(recipe.tools.cCompiler),
+      cxxCompiler: recipeToolIdentity(recipe.tools.cxxCompiler),
+      llvmConfig: recipeToolIdentity(recipe.tools.llvmConfig),
+      clang: recipeToolIdentity(recipe.tools.clang),
+      lld: recipeToolIdentity(recipe.tools.lld),
+      generatorTool: recipeToolIdentity(recipe.tools.generatorTool),
+    },
+  };
+}
+
+async function ensurePhysicalBuildParent(parent: string): Promise<void> {
+  await Deno.mkdir(parent, { recursive: true });
+  const info = await Deno.lstat(parent);
+  if (
+    !info.isDirectory || info.isSymlink || resolve(await Deno.realPath(parent)) !== resolve(parent)
+  ) {
+    throw new ZigBuildError("Build cache parent is not a physical directory", { parent });
+  }
+}
+
+/** Remove only the exact replaceable cache object and never follow a symbolic link. */
+async function removeReplaceableBuildObject(
+  parent: string,
+  target: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal, "remove corrupt build cache");
+  if (dirname(resolve(target)) !== resolve(parent)) {
+    throw new ZigBuildError("Refused to remove a build object outside its canonical parent", {
+      parent,
+      target,
+    });
+  }
+  const info = await Deno.lstat(target);
+  if (info.isSymlink || !info.isDirectory) {
+    throwIfAborted(signal, "remove corrupt build cache");
+    await Deno.remove(target);
+    return;
+  }
+  const pending: Array<{ readonly path: string; readonly visited: boolean }> = [{
+    path: target,
+    visited: false,
+  }];
+  while (pending.length > 0) {
+    throwIfAborted(signal, "remove corrupt build cache");
+    const current = pending.pop()!;
+    const currentInfo = await Deno.lstat(current.path);
+    if (!currentInfo.isDirectory || currentInfo.isSymlink) {
+      throwIfAborted(signal, "remove corrupt build cache");
+      await Deno.remove(current.path);
+      continue;
+    }
+    if (current.visited) {
+      throwIfAborted(signal, "remove corrupt build cache");
+      await Deno.remove(current.path);
+      continue;
+    }
+    pending.push({ path: current.path, visited: true });
+    const entries: Deno.DirEntry[] = [];
+    for await (const entry of Deno.readDir(current.path)) entries.push(entry);
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (let index = entries.length - 1; index >= 0; index--) {
+      pending.push({ path: join(current.path, entries[index].name), visited: false });
+    }
+  }
+}
+
 async function writeAll(file: Deno.FsFile, chunk: Uint8Array): Promise<void> {
   let offset = 0;
   while (offset < chunk.length) offset += await file.write(chunk.subarray(offset));
+}
+
+async function writeSyncedTextFile(path: string, text: string): Promise<void> {
+  const file = await Deno.open(path, { createNew: true, write: true, mode: 0o600 });
+  try {
+    await writeAll(file, new TextEncoder().encode(text));
+    await file.sync();
+  } finally {
+    file.close();
+  }
+}
+
+async function createDurableLogRoot(
+  logsBase: string,
+  logRoot: string,
+  operationId: string,
+  installationId: string,
+): Promise<void> {
+  assertLogOwnership(logsBase, logRoot, operationId, installationId);
+  await ensurePhysicalBuildParent(logsBase);
+  const operationRoot = join(logsBase, operationId);
+  try {
+    await Deno.mkdir(operationRoot);
+    await Deno.mkdir(logRoot, { recursive: true });
+  } catch (cause) {
+    throw new ZigBuildError("Durable build log staging could not be created", {
+      operationId,
+      logRoot,
+    }, { cause });
+  }
+  const info = await Deno.lstat(logRoot);
+  if (!info.isDirectory || info.isSymlink || resolve(await Deno.realPath(logRoot)) !== logRoot) {
+    throw new ZigBuildError("Durable build log root is not a physical directory", { logRoot });
+  }
+}
+
+function assertBuildStagingOwnership(
+  stagingParent: string,
+  operationRoot: string,
+  stagingRoot: string,
+  operationId: string,
+  installationId: string,
+): void {
+  operationUuid(operationId);
+  if (!INSTALLATION_ID.test(installationId)) {
+    throw new TypeError("installationId must be a lowercase SHA-256 digest");
+  }
+  const expectedOperation = join(resolve(stagingParent), operationId);
+  const expectedStaging = join(expectedOperation, installationId);
+  if (
+    resolve(operationRoot) !== expectedOperation || resolve(stagingRoot) !== expectedStaging ||
+    dirname(expectedOperation) !== resolve(stagingParent) ||
+    dirname(expectedStaging) !== expectedOperation
+  ) throw new TypeError("build staging does not match its operation UUID and installation ID");
+}
+
+function assertLogOwnership(
+  logsBase: string,
+  logRoot: string,
+  operationId: string,
+  installationId: string,
+): void {
+  operationUuid(operationId);
+  if (!INSTALLATION_ID.test(installationId)) {
+    throw new TypeError("installationId must be a lowercase SHA-256 digest");
+  }
+  const expected = join(resolve(logsBase), operationId, "zig", installationId);
+  if (resolve(logRoot) !== expected) {
+    throw new TypeError("build log root does not match its operation UUID and installation ID");
+  }
+}
+
+async function cleanupOwnedBuildStaging(
+  stagingParent: string,
+  operationRoot: string,
+  stagingRoot: string,
+  operationId: string,
+  installationId: string,
+  operationCause: unknown,
+): Promise<void> {
+  try {
+    assertBuildStagingOwnership(
+      stagingParent,
+      operationRoot,
+      stagingRoot,
+      operationId,
+      installationId,
+    );
+    try {
+      const info = await Deno.lstat(stagingRoot);
+      await Deno.remove(stagingRoot, { recursive: info.isDirectory && !info.isSymlink });
+    } catch (cause) {
+      if (!(cause instanceof Deno.errors.NotFound)) throw cause;
+    }
+    await removeEmptyDirectory(operationRoot);
+  } catch (cause) {
+    throw new AggregateError(
+      [operationCause, cause],
+      "Managed Zig build failed and its exact owned staging could not be removed",
+    );
+  }
+}
+
+async function removeEmptyDirectory(path: string): Promise<void> {
+  try {
+    for await (const _entry of Deno.readDir(path)) return;
+    await Deno.remove(path);
+  } catch (cause) {
+    if (!(cause instanceof Deno.errors.NotFound)) throw cause;
+  }
+}
+
+function buildFailureWithLogs(
+  cause: unknown,
+  signal: AbortSignal | undefined,
+  stagingRoot: string,
+  logRoot: string,
+): Error {
+  if (signal?.aborted) {
+    return new ZigOperationAbortedError("build", { logRoot }, { cause: signal.reason });
+  }
+  if (cause instanceof ZigOperationAbortedError) {
+    return new ZigOperationAbortedError(
+      String(cause.details.operation ?? "build"),
+      { ...cause.details, logRoot },
+      { cause },
+    );
+  }
+  if (cause instanceof ZigBuildError) {
+    return new ZigBuildError(cause.message, { ...cause.details, logRoot }, { cause });
+  }
+  if (cause instanceof ZigBinaryVerificationError) {
+    const reason = typeof cause.details.reason === "string" ? cause.details.reason : cause.message;
+    return new ZigBinaryVerificationError(reason, { ...cause.details, logRoot });
+  }
+  return new ZigBuildError("Managed Zig build failed", { stagingRoot, logRoot }, { cause });
+}
+
+function operationUuid(value: string): string {
+  if (!OPERATION_ID.test(value)) throw new TypeError("operationId must be a canonical UUID");
+  return value;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined, operation: string): void {
+  if (signal?.aborted) {
+    throw new ZigOperationAbortedError(operation, {}, { cause: signal.reason });
+  }
 }

@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jsr.io/@zignado/zig-manager/toolchain-profile.schema.json",
+  "title": "zig-manager immutable toolchain profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "profileId",
+    "components",
+    "source",
+    "host",
+    "createdAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "profileId": {
+      "$ref": "#/$defs/hash"
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "zig",
+        "zls"
+      ],
+      "properties": {
+        "zig": {
+          "$ref": "#/$defs/hash"
+        },
+        "zls": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/hash"
+            }
+          ]
+        }
+      }
+    },
+    "source": {
+      "$ref": "#/$defs/resolvedSource"
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "architecture",
+        "abi",
+        "denoTarget"
+      ],
+      "properties": {
+        "os": {
+          "$ref": "#/$defs/text"
+        },
+        "architecture": {
+          "$ref": "#/$defs/text"
+        },
+        "abi": {
+          "$ref": "#/$defs/text"
+        },
+        "denoTarget": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "createdAt": {
+      "$ref": "#/$defs/timestamp"
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{3})?Z$"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "url"
+      ],
+      "properties": {
+        "identity": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]{0,127}$"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        }
+      }
+    },
+    "resolvedRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "value"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "head",
+            "tag",
+            "branch",
+            "commit"
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "resolvedSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "repository",
+        "requestedSelector",
+        "resolvedRef",
+        "commit",
+        "version",
+        "versionMetadata",
+        "resolvedAt"
+      ],
+      "properties": {
+        "component": {
+          "enum": [
+            "zig",
+            "zls"
+          ]
+        },
+        "repository": {
+          "$ref": "#/$defs/repository"
+        },
+        "requestedSelector": {
+          "$ref": "#/$defs/text"
+        },
+        "resolvedRef": {
+          "$ref": "#/$defs/resolvedRef"
+        },
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "version": {
+          "$ref": "#/$defs/text"
+        },
+        "versionMetadata": {
+          "$ref": "#/$defs/sourceVersion"
+        },
+        "resolvedAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "sourceVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "base",
+        "text",
+        "taggedAncestor",
+        "commitsAfterTag",
+        "commitAbbreviation"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "release",
+            "development"
+          ]
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "text": {
+          "$ref": "#/$defs/text"
+        },
+        "taggedAncestor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "commitsAfterTag": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "commitAbbreviation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4,64}$"
+        }
+      }
+    }
+  }
+}

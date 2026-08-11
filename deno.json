@@ -16,6 +16,7 @@
     "lint": "deno lint",
     "typecheck": "deno check src/mod.ts src/cli.ts",
     "test": "deno test --allow-env --allow-read --allow-write --allow-run tests",
+    "zm": "deno run --allow-env --allow-read --allow-write --allow-run --allow-sys src/cli.ts",
     "check": "deno task fmt:check && deno task lint && deno task typecheck && deno task test"
   },
   "publish": {

@@ -1,3 +1,5 @@
+import type { DiagnosticFinding } from "./types.ts";
+
 export type ZigManagerErrorCode =
   | "ZIG_CONFIG_NOT_FOUND"
   | "ZIG_CONFIG_INVALID"
@@ -20,22 +22,39 @@ export type ZigManagerErrorCode =
   | "ZIG_OPERATION_ABORTED"
   | "ZIG_PROCESS_FAILED"
   | "ZIG_IO"
-  | "ZIG_INVALID_ARGUMENT";
+  | "ZIG_INVALID_ARGUMENT"
+  | "ZIG_HOST_UNSUPPORTED"
+  | "ZIG_SCOPE_NOT_PINNED"
+  | "ZIG_SCOPE_LOCKED"
+  | "ZIG_PROFILE_NOT_FOUND"
+  | "ZIG_PROFILE_INVALID"
+  | "ZIG_INSTALL_NOT_FOUND"
+  | "ZIG_INSTALL_CORRUPT"
+  | "ZIG_INSTALL_LOCKED"
+  | "ZIG_INSTALL_IN_USE"
+  | "ZIG_DEPENDENCY_IN_USE"
+  | "ZIG_FALLBACK_NOT_FOUND"
+  | "ZIG_SHELL_UNSUPPORTED"
+  | "ZIG_PURGE_CONFIRMATION_REQUIRED"
+  | "ZLS_COMPATIBILITY_NOT_FOUND";
 
 export class ZigManagerError extends Error {
   readonly code: ZigManagerErrorCode;
   readonly details: Readonly<Record<string, unknown>>;
+  readonly remediation: string | null;
 
   constructor(
     code: ZigManagerErrorCode,
     message: string,
     details: Readonly<Record<string, unknown>> = {},
     options?: ErrorOptions,
+    remediation: string | null = null,
   ) {
     super(message, options);
     this.name = new.target.name;
     this.code = code;
     this.details = details;
+    this.remediation = remediation;
   }
 }
 
@@ -92,11 +111,16 @@ export class ZigVersionNotFoundError extends ZigManagerError {
 }
 
 export class ZigReleaseUnsupportedError extends ZigManagerError {
-  constructor(version: string | null) {
+  constructor(
+    version: string | null,
+    details: Readonly<Record<string, unknown>> = {},
+  ) {
     super(
       "ZIG_RELEASE_UNSUPPORTED",
       `No release adapter supports Zig ${version ?? "with an unknown exact version"}`,
-      { version },
+      { version, ...details },
+      undefined,
+      "Use a Zig source version with a tested release adapter or upgrade zig-manager for newer source support.",
     );
   }
 }
@@ -114,20 +138,32 @@ export class ZigStateValidationError extends ZigManagerError {
 
 export class ZigSourceNotReadyError extends ZigManagerError {
   constructor(reason: string, details: Readonly<Record<string, unknown>> = {}) {
-    super("ZIG_SOURCE_NOT_READY", `Selected Zig source is not ready: ${reason}`, {
-      reason,
-      ...details,
-    });
+    super(
+      "ZIG_SOURCE_NOT_READY",
+      `Selected Zig source is not ready: ${reason}`,
+      {
+        reason,
+        ...details,
+      },
+      undefined,
+      "Repair the exact source checkout or remove local changes before retrying.",
+    );
   }
 }
 
 export class BuildPrerequisiteError extends ZigManagerError {
-  constructor(issues: readonly unknown[]) {
+  readonly findings: readonly DiagnosticFinding[];
+
+  constructor(findings: readonly DiagnosticFinding[]) {
+    const errors = findings.filter((finding) => finding.severity === "error");
     super(
       "ZIG_BUILD_PREREQUISITE_MISSING",
-      "Zig build prerequisites are missing or incompatible",
-      { issues },
+      "Zig build preflight reported blocking diagnostic errors",
+      { findings: errors },
+      undefined,
+      "Resolve every error finding reported by doctor before retrying the build.",
     );
+    this.findings = errors;
   }
 }
 
@@ -160,6 +196,8 @@ export class ZigBinaryVerificationError extends ZigManagerError {
       "ZIG_BINARY_VERIFICATION_FAILED",
       `Managed Zig binary verification failed: ${reason}`,
       { reason, ...details },
+      undefined,
+      "Repair or rebuild the immutable Zig installation before selecting it.",
     );
   }
 }
@@ -212,11 +250,15 @@ export class MegaDocsUnsupportedFormatError extends ZigManagerError {
 }
 
 export class ZigOperationAbortedError extends ZigManagerError {
-  constructor(operation: string, options?: ErrorOptions) {
+  constructor(
+    operation: string,
+    details: Readonly<Record<string, unknown>> = {},
+    options?: ErrorOptions,
+  ) {
     super(
       "ZIG_OPERATION_ABORTED",
       `Zig manager operation was aborted: ${operation}`,
-      { operation },
+      { operation, ...details },
       options,
     );
   }
@@ -242,5 +284,147 @@ export class ZigIoError extends ZigManagerError {
 export class ZigInvalidArgumentError extends ZigManagerError {
   constructor(message: string, details: Readonly<Record<string, unknown>> = {}) {
     super("ZIG_INVALID_ARGUMENT", message, details);
+  }
+}
+
+export class ZigHostUnsupportedError extends ZigManagerError {
+  constructor(reason: string, details: Readonly<Record<string, unknown>> = {}) {
+    super(
+      "ZIG_HOST_UNSUPPORTED",
+      `Unsupported Zig manager host: ${reason}`,
+      {
+        reason,
+        ...details,
+      },
+      undefined,
+      "Run zig-manager on Arch Linux using the x86_64-unknown-linux-gnu Deno target.",
+    );
+  }
+}
+
+export class ZigScopeNotPinnedError extends ZigManagerError {
+  constructor(path: string, inheritedFrom: string | null = null) {
+    super(
+      "ZIG_SCOPE_NOT_PINNED",
+      inheritedFrom === null
+        ? `No Zig toolchain pin exists exactly at '${path}'`
+        : `No Zig toolchain pin exists exactly at '${path}'; the effective pin is inherited from '${inheritedFrom}'`,
+      { path, inheritedFrom },
+    );
+  }
+}
+
+export class ZigProfileNotFoundError extends ZigManagerError {
+  constructor(profileId: string, scopeRoot?: string, options?: ErrorOptions) {
+    super(
+      "ZIG_PROFILE_NOT_FOUND",
+      `Pinned Zig toolchain profile was not found: ${profileId}`,
+      { profileId, ...(scopeRoot === undefined ? {} : { scopeRoot }) },
+      options,
+      "Repair or replace the explicit directory profile pin.",
+    );
+  }
+}
+
+export class ZigProfileInvalidError extends ZigManagerError {
+  constructor(profileId: string, reason: string, options?: ErrorOptions) {
+    super(
+      "ZIG_PROFILE_INVALID",
+      `Pinned Zig toolchain profile '${profileId}' is invalid: ${reason}`,
+      { profileId, reason },
+      options,
+      "Repair or replace the invalid profile and its explicit directory pin.",
+    );
+  }
+}
+
+export class ZigInstallNotFoundError extends ZigManagerError {
+  constructor(installationId: string, options?: ErrorOptions) {
+    super(
+      "ZIG_INSTALL_NOT_FOUND",
+      `Managed Zig installation was not found: ${installationId}`,
+      { installationId },
+      options,
+      "Rebuild the exact source or select an existing immutable installation.",
+    );
+  }
+}
+
+export class ZigInstallCorruptError extends ZigManagerError {
+  constructor(installationId: string, reason: string, options?: ErrorOptions) {
+    super(
+      "ZIG_INSTALL_CORRUPT",
+      `Managed Zig installation '${installationId}' is invalid: ${reason}`,
+      { installationId, reason },
+      options,
+      "Rebuild the immutable installation; zig-manager will not silently use another Zig.",
+    );
+  }
+}
+
+export class ZigInstallInUseError extends ZigManagerError {
+  constructor(
+    component: "zig" | "zls",
+    installationId: string,
+    profileIds: readonly string[],
+  ) {
+    super(
+      "ZIG_INSTALL_IN_USE",
+      `Managed ${component.toUpperCase()} installation '${installationId}' is referenced by retained profiles`,
+      { component, installationId, profileIds: [...profileIds] },
+    );
+  }
+}
+
+export class ZigDependencyInUseError extends ZigManagerError {
+  constructor(installationId: string, dependentInstallationIds: readonly string[]) {
+    super(
+      "ZIG_DEPENDENCY_IN_USE",
+      `Managed Zig installation '${installationId}' is required by retained ZLS installations`,
+      {
+        component: "zig",
+        installationId,
+        dependentInstallationIds: [...dependentInstallationIds],
+      },
+    );
+  }
+}
+
+export class ZigFallbackNotFoundError extends ZigManagerError {
+  constructor(tool: "zig" | "zls") {
+    super(
+      "ZIG_FALLBACK_NOT_FOUND",
+      `No fallback ${tool} executable exists on the captured base PATH`,
+      { tool },
+      undefined,
+      `Add the desired external ${tool} to PATH before activating zig-manager.`,
+    );
+  }
+}
+
+export class ZigShellUnsupportedError extends ZigManagerError {
+  constructor(shell: string) {
+    super("ZIG_SHELL_UNSUPPORTED", `Unsupported shell '${shell}'; only Bash is supported`, {
+      shell,
+    });
+  }
+}
+
+export class ZigPurgeConfirmationError extends ZigManagerError {
+  constructor() {
+    super(
+      "ZIG_PURGE_CONFIRMATION_REQUIRED",
+      "Purging manager-owned data requires explicit confirmation or --dry-run",
+    );
+  }
+}
+
+export class ZlsCompatibilityNotFoundError extends ZigManagerError {
+  constructor(profileId: string) {
+    super(
+      "ZLS_COMPATIBILITY_NOT_FOUND",
+      `Toolchain profile '${profileId}' has no managed ZLS; ZLS support is deferred`,
+      { profileId },
+    );
   }
 }

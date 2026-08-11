@@ -11,30 +11,19 @@ export const MEGA_FORMAT_VERSION = 1 as const;
 
 export const MINIMUM_DENO_VERSION = "2.0.0";
 export const MINIMUM_GIT_VERSION = SOURCE_REF_MINIMUM_GIT_VERSION;
-export const MINIMUM_CMAKE_VERSION = "3.15.0";
 export const MINIMUM_FREE_DISK_BYTES = 20 * 1024 * 1024 * 1024;
+export const RECOMMENDED_FREE_DISK_BYTES = 40 * 1024 * 1024 * 1024;
+export const RECOMMENDED_MEMORY_BYTES = 16 * 1024 * 1024 * 1024;
 
 export const INITIAL_ZIG_SELECTOR = "commit:9df02121d0d87c17173f79d55692bed9cb65722c";
-export const REQUIRED_LLVM_MAJOR = 21 as const;
-export const REQUIRED_CLANG_MAJOR = 21 as const;
-export const REQUIRED_LLD_MAJOR = 21 as const;
-
 export interface MinimumToolVersions {
   readonly deno: string;
   readonly git: string;
-  readonly cmake: string;
-  readonly llvmMajor: number;
-  readonly clangMajor: number;
-  readonly lldMajor: number;
 }
 
 export const MINIMUM_TOOLS: Readonly<MinimumToolVersions> = Object.freeze({
   deno: MINIMUM_DENO_VERSION,
   git: MINIMUM_GIT_VERSION,
-  cmake: MINIMUM_CMAKE_VERSION,
-  llvmMajor: REQUIRED_LLVM_MAJOR,
-  clangMajor: REQUIRED_CLANG_MAJOR,
-  lldMajor: REQUIRED_LLD_MAJOR,
 });
 
 export const ZIG_MANAGER_CONFIG_FILE = "zig-manager.json";

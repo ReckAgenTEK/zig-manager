@@ -1,4 +1,5 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import { ZigOperationAbortedError } from "../src/errors.ts";
 import { DenoProcessRunner } from "../src/process_runner.ts";
 import { sha256Text } from "../src/filesystem.ts";
 
@@ -37,16 +38,56 @@ Deno.test("Deno process runner reports nonzero exits without throwing", async ()
   assertStringIncludes(result.stderr, "failure");
 });
 
-Deno.test("Deno process runner terminates an aborted child and returns signal status", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test("Deno process runner rejects a pre-aborted request without spawning", async () => {
   const controller = new AbortController();
-  const pending = new DenoProcessRunner().run({
-    executable: Deno.execPath(),
-    args: ["eval", "await new Promise((resolve) => setTimeout(resolve, 30000))"],
-    signal: controller.signal,
-  });
-  setTimeout(() => controller.abort(), 30);
-  const result = await pending;
-  assertEquals(result.success, false);
-  assertEquals(result.signal, "SIGTERM");
+  controller.abort("SIGINT");
+  const error = await assertRejects(
+    () =>
+      new DenoProcessRunner().run({
+        executable: "/definitely/not/a/real/executable",
+        args: [],
+        signal: controller.signal,
+      }),
+    ZigOperationAbortedError,
+  );
+  assertEquals(error.details.signal, "SIGINT");
+});
+
+Deno.test("Deno process runner propagates SIGINT and SIGTERM and rejects child exit zero", async () => {
+  if (Deno.build.os === "windows") return;
+  for (
+    const [reason, expected] of [
+      ["SIGINT", "SIGINT"],
+      ["SIGTERM", "SIGTERM"],
+      [undefined, "SIGTERM"],
+    ] as const
+  ) {
+    const controller = new AbortController();
+    let output = "";
+    let readyResolve!: () => void;
+    const ready = new Promise<void>((resolve) => readyResolve = resolve);
+    const script = `
+      const signal = Deno.args[0];
+      Deno.addSignalListener(signal, async () => {
+        await Deno.stdout.write(new TextEncoder().encode(signal + "\\n"));
+        Deno.exit(0);
+      });
+      await Deno.stdout.write(new TextEncoder().encode("ready\\n"));
+      await new Promise(() => {});
+    `;
+    const pending = new DenoProcessRunner({ terminationGraceMs: 100 }).run({
+      executable: Deno.execPath(),
+      args: ["eval", script, expected],
+      signal: controller.signal,
+      onStdout: (chunk) => {
+        output += new TextDecoder().decode(chunk);
+        if (output.includes("ready\n")) readyResolve();
+      },
+    });
+    await ready;
+    controller.abort(reason);
+    const error = await assertRejects(() => pending, ZigOperationAbortedError);
+    assertEquals(error.details.signal, expected);
+    assertStringIncludes(output, `${expected}\n`);
+  }
 });

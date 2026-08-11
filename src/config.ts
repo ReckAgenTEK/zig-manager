@@ -3,6 +3,7 @@ import { MAX_CONFIG_BYTES, ZIG_MANAGER_CONFIG_FILE } from "./constants.ts";
 import { ConfigNotFoundError, ConfigValidationError } from "./errors.ts";
 import { assertPathBelow, assertRealPathContained } from "./filesystem.ts";
 import { parseZigSelector } from "./versions.ts";
+import { DEFAULT_GLOBAL_CONFIG } from "./global_config.ts";
 import type {
   ResolvedZigManagerConfig,
   ZigBuildProfile,
@@ -97,6 +98,7 @@ export function resolveZigManagerConfig(
       build: { ...config.build },
       docs: { ...config.docs },
       tools,
+      warnings: { ...DEFAULT_GLOBAL_CONFIG.warnings },
     };
   } catch (cause) {
     if (cause instanceof ConfigValidationError) throw cause;

@@ -1,7 +1,13 @@
 import { dirname, isAbsolute, relative, resolve } from "@std/path";
-import { ZigIoError, ZigPathOutsideRootError } from "./errors.ts";
+import { ZigIoError, ZigOperationAbortedError, ZigPathOutsideRootError } from "./errors.ts";
 
 const encoder = new TextEncoder();
+const OPERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export interface AtomicWriteOptions {
+  readonly signal?: AbortSignal;
+  readonly operationId?: string;
+}
 
 export function isPathContained(root: string, candidate: string): boolean {
   const normalizedRoot = resolve(root);
@@ -52,28 +58,43 @@ export async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-export async function atomicWriteText(path: string, text: string): Promise<void> {
+export async function atomicWriteText(
+  path: string,
+  text: string,
+  options: AtomicWriteOptions = {},
+): Promise<void> {
   const parent = dirname(path);
-  const temporary = `${path}.tmp-${crypto.randomUUID()}`;
+  const operationId = options.operationId ?? crypto.randomUUID();
+  if (!OPERATION_ID.test(operationId)) throw new TypeError("operationId must be a canonical UUID");
+  const temporary = `${path}.tmp-${operationId}`;
+  let created = false;
   try {
+    throwIfAborted(options.signal, "write file atomically", { path });
     await Deno.mkdir(parent, { recursive: true });
+    throwIfAborted(options.signal, "write file atomically", { path });
     const file = await Deno.open(temporary, { createNew: true, write: true, mode: 0o644 });
+    created = true;
     try {
       await writeAll(file, encoder.encode(text));
       await file.sync();
     } finally {
       file.close();
     }
-    await atomicReplacePath(temporary, path);
+    throwIfAborted(options.signal, "write file atomically", { path });
+    await atomicReplacePath(temporary, path, options.signal);
   } catch (cause) {
-    await removeIfPresent(temporary);
-    if (cause instanceof ZigIoError) throw cause;
+    if (created) await removeIfPresent(temporary);
+    if (cause instanceof ZigIoError || cause instanceof ZigOperationAbortedError) throw cause;
     throw new ZigIoError("write file atomically", path, { cause });
   }
 }
 
-export async function atomicWriteJson(path: string, value: unknown): Promise<void> {
-  await atomicWriteText(path, `${canonicalJson(value, 2)}\n`);
+export async function atomicWriteJson(
+  path: string,
+  value: unknown,
+  options: AtomicWriteOptions = {},
+): Promise<void> {
+  await atomicWriteText(path, `${canonicalJson(value, 2)}\n`, options);
 }
 
 export async function atomicReplaceDirectory(
@@ -111,13 +132,20 @@ export async function atomicPublishFile(stagedPath: string, destination: string)
   }
 }
 
-async function atomicReplacePath(stagedPath: string, destination: string): Promise<void> {
+async function atomicReplacePath(
+  stagedPath: string,
+  destination: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal, "publish staged path", { stagedPath, destination });
   if (!await pathExists(destination)) {
+    throwIfAborted(signal, "publish staged path", { stagedPath, destination });
     await Deno.rename(stagedPath, destination);
     return;
   }
 
   try {
+    throwIfAborted(signal, "publish staged path", { stagedPath, destination });
     await Deno.rename(stagedPath, destination);
     return;
   } catch (cause) {
@@ -127,6 +155,7 @@ async function atomicReplacePath(stagedPath: string, destination: string): Promi
   }
 
   const backup = `${destination}.old-${crypto.randomUUID()}`;
+  throwIfAborted(signal, "publish staged path", { stagedPath, destination });
   await Deno.rename(destination, backup);
   try {
     await Deno.rename(stagedPath, destination);
@@ -183,7 +212,8 @@ export async function sha256Text(text: string): Promise<string> {
   return await sha256Bytes(encoder.encode(text));
 }
 
-export async function sha256File(path: string): Promise<string> {
+export async function sha256File(path: string, signal?: AbortSignal): Promise<string> {
+  throwIfAborted(signal, "hash file", { path });
   let file: Deno.FsFile;
   try {
     file = await Deno.open(path, { read: true });
@@ -194,10 +224,12 @@ export async function sha256File(path: string): Promise<string> {
     const hash = new Sha256();
     const buffer = new Uint8Array(1024 * 1024);
     while (true) {
+      throwIfAborted(signal, "hash file", { path });
       const count = await file.read(buffer);
       if (count === null) break;
       hash.update(buffer.subarray(0, count));
     }
+    throwIfAborted(signal, "hash file", { path });
     return bytesToHex(hash.digest());
   } finally {
     file.close();
@@ -206,14 +238,16 @@ export async function sha256File(path: string): Promise<string> {
 
 export async function fileMetadata(
   path: string,
+  signal?: AbortSignal,
 ): Promise<{ readonly size: number; readonly sha256: string }> {
   try {
+    throwIfAborted(signal, "inspect file", { path });
     const stat = await Deno.stat(path);
     if (!stat.isFile) throw new Error("path is not a regular file");
     if (!Number.isSafeInteger(stat.size)) throw new Error("file size is not safely representable");
-    return { size: stat.size, sha256: await sha256File(path) };
+    return { size: stat.size, sha256: await sha256File(path, signal) };
   } catch (cause) {
-    if (cause instanceof ZigIoError) throw cause;
+    if (cause instanceof ZigIoError || cause instanceof ZigOperationAbortedError) throw cause;
     throw new ZigIoError("inspect file", path, { cause });
   }
 }
@@ -221,6 +255,16 @@ export async function fileMetadata(
 async function writeAll(file: Deno.FsFile, bytes: Uint8Array): Promise<void> {
   let offset = 0;
   while (offset < bytes.length) offset += await file.write(bytes.subarray(offset));
+}
+
+function throwIfAborted(
+  signal: AbortSignal | undefined,
+  operation: string,
+  details: Readonly<Record<string, unknown>>,
+): void {
+  if (signal?.aborted) {
+    throw new ZigOperationAbortedError(operation, details, { cause: signal.reason });
+  }
 }
 
 function separator(): string {

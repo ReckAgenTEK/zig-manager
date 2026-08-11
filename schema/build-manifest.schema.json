@@ -7,6 +7,7 @@
   "required": [
     "schemaVersion",
     "identity",
+    "recipe",
     "source",
     "hostTarget",
     "configuration",
@@ -21,6 +22,9 @@
     },
     "identity": {
       "$ref": "#/$defs/hash"
+    },
+    "recipe": {
+      "$ref": "build-recipe-v1.schema.json"
     },
     "source": {
       "$ref": "#/$defs/source"
@@ -182,7 +186,8 @@
             "cmakeBuildType",
             "generator",
             "jobs",
-            "cmakePrefixPath"
+            "cmakePrefixPath",
+            "cpu"
           ],
           "properties": {
             "strategy": {
@@ -221,6 +226,12 @@
             },
             "cmakePrefixPath": {
               "type": "string"
+            },
+            "cpu": {
+              "enum": [
+                "baseline",
+                "native"
+              ]
             }
           }
         },
@@ -319,7 +330,8 @@
         "executable",
         "args",
         "cwd",
-        "env"
+        "env",
+        "clearEnv"
       ],
       "properties": {
         "executable": {
@@ -341,6 +353,9 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "clearEnv": {
+          "const": true
         }
       }
     }

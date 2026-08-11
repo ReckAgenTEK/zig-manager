@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jsr.io/@zignado/zig-manager/zig-manager-global.schema.json",
+  "title": "zig-manager optional global build configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "$ref": "#/$defs/httpsUrl"
+    },
+    "zigRepository": {
+      "$ref": "#/$defs/repositoryUrl",
+      "default": "https://codeberg.org/ziglang/zig.git"
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "enum": [
+            "debug",
+            "release",
+            "relwithdebinfo",
+            "minsizerel"
+          ],
+          "default": "release"
+        },
+        "generator": {
+          "$ref": "#/$defs/text",
+          "default": "Ninja"
+        },
+        "jobs": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ],
+          "default": null
+        },
+        "cpu": {
+          "enum": [
+            "baseline",
+            "native"
+          ],
+          "default": "baseline"
+        },
+        "cmakePrefixPath": {
+          "$ref": "#/$defs/nullableText",
+          "default": null
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cmake": {
+          "$ref": "#/$defs/nullableText",
+          "default": null
+        },
+        "cCompiler": {
+          "$ref": "#/$defs/nullableText",
+          "default": null
+        },
+        "cxxCompiler": {
+          "$ref": "#/$defs/nullableText",
+          "default": null
+        },
+        "llvmConfig": {
+          "$ref": "#/$defs/nullableText",
+          "default": null
+        },
+        "clang": {
+          "$ref": "#/$defs/nullableText",
+          "default": null
+        },
+        "lld": {
+          "$ref": "#/$defs/nullableText",
+          "default": null
+        },
+        "generatorTool": {
+          "$ref": "#/$defs/nullableText",
+          "default": null
+        }
+      }
+    },
+    "warnings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cacheBytes": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ],
+          "default": null
+        },
+        "movingSelectorMaxAgeHours": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 24
+        }
+      }
+    }
+  },
+  "$defs": {
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "nullableText": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/text"
+        }
+      ]
+    },
+    "httpsUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "repositoryUrl": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        {
+          "not": {
+            "pattern": "^https://[^/]*@"
+          }
+        },
+        {
+          "not": {
+            "pattern": "[?#]"
+          }
+        }
+      ]
+    }
+  }
+}

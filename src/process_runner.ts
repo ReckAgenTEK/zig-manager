@@ -1,10 +1,25 @@
 import { DEFAULT_MAX_DIAGNOSTIC_BYTES } from "./constants.ts";
-import { ZigProcessError } from "./errors.ts";
+import { ZigOperationAbortedError, ZigProcessError } from "./errors.ts";
 import type { ProcessRequest, ProcessResult, ProcessRunner } from "./types.ts";
 
+export interface DenoProcessRunnerOptions {
+  readonly terminationGraceMs?: number;
+}
+
 export class DenoProcessRunner implements ProcessRunner {
+  readonly #terminationGraceMs: number;
+
+  constructor(options: DenoProcessRunnerOptions = {}) {
+    const grace = options.terminationGraceMs ?? 2_000;
+    if (!Number.isSafeInteger(grace) || grace < 0) {
+      throw new TypeError("terminationGraceMs must be a nonnegative integer");
+    }
+    this.#terminationGraceMs = grace;
+  }
+
   async run(request: ProcessRequest): Promise<ProcessResult> {
     validateRequest(request);
+    throwIfAborted(request);
     let child: Deno.ChildProcess;
     try {
       child = new Deno.Command(request.executable, {
@@ -17,16 +32,19 @@ export class DenoProcessRunner implements ProcessRunner {
         stderr: "piped",
       }).spawn();
     } catch (cause) {
+      if (request.signal?.aborted) throw abortedError(request);
       throw new ZigProcessError(request.executable, errorMessage(cause), { cause });
     }
 
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     let terminationRequested = false;
+    let terminationSignal: Deno.Signal = "SIGTERM";
     const abort = () => {
       if (terminationRequested) return;
       terminationRequested = true;
+      terminationSignal = request.signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM";
       try {
-        child.kill("SIGTERM");
+        child.kill(terminationSignal);
       } catch {
         // The process may have exited between the abort and kill calls.
       }
@@ -36,7 +54,7 @@ export class DenoProcessRunner implements ProcessRunner {
         } catch {
           // The process exited during the termination grace period.
         }
-      }, 2_000);
+      }, this.#terminationGraceMs);
     };
     request.signal?.addEventListener("abort", abort, { once: true });
     if (request.signal?.aborted) abort();
@@ -50,6 +68,7 @@ export class DenoProcessRunner implements ProcessRunner {
         stdout,
         stderr,
       ]);
+      if (terminationRequested || request.signal?.aborted) throw abortedError(request);
       return {
         success: status.success,
         code: status.code,
@@ -60,12 +79,27 @@ export class DenoProcessRunner implements ProcessRunner {
         stderrTruncated: stderrCapture.truncated,
       };
     } catch (cause) {
+      if (cause instanceof ZigOperationAbortedError) throw cause;
+      if (terminationRequested || request.signal?.aborted) throw abortedError(request, cause);
       throw new ZigProcessError(request.executable, errorMessage(cause), { cause });
     } finally {
       if (killTimer !== undefined) clearTimeout(killTimer);
       request.signal?.removeEventListener("abort", abort);
     }
   }
+}
+
+function throwIfAborted(request: ProcessRequest): void {
+  if (request.signal?.aborted) throw abortedError(request);
+}
+
+function abortedError(request: ProcessRequest, cause?: unknown): ZigOperationAbortedError {
+  const reason = request.signal?.reason;
+  return new ZigOperationAbortedError(
+    `process ${request.executable}`,
+    { signal: reason === "SIGINT" ? "SIGINT" : "SIGTERM" },
+    { cause: cause ?? reason },
+  );
 }
 
 interface Capture {

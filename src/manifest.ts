@@ -1,4 +1,5 @@
 import { BUILD_MANIFEST_SCHEMA_VERSION, DOCS_MANIFEST_SCHEMA_VERSION } from "./constants.ts";
+import { validateZigBuildRecipe } from "./build_recipe.ts";
 import { BuildManifestValidationError, DocsManifestValidationError } from "./errors.ts";
 import { atomicWriteJson } from "./filesystem.ts";
 import { validateZigSourceVersion } from "./source_version.ts";
@@ -68,6 +69,7 @@ export function validateBuildManifest(value: unknown): BuildManifest {
   const root = object(value, "root", [
     "schemaVersion",
     "identity",
+    "recipe",
     "source",
     "hostTarget",
     "configuration",
@@ -92,6 +94,7 @@ export function validateBuildManifest(value: unknown): BuildManifest {
   if (!Array.isArray(root.commands)) throw new Error("commands must be an array");
   const sourceCommit = commit(source.commit, "source.commit");
   const sourceVersion = validateZigSourceVersion(source.version, "source.version");
+  const recipe = validateZigBuildRecipe(root.recipe, "recipe");
   if (!sourceCommit.startsWith(sourceVersion.commitAbbreviation)) {
     throw new Error("source.version.commitAbbreviation does not identify source.commit");
   }
@@ -99,9 +102,14 @@ export function validateBuildManifest(value: unknown): BuildManifest {
   if (compilerVersion !== sourceVersion.text) {
     throw new Error("compiler.version does not match source.version.text");
   }
+  if (
+    recipe.component !== "zig" || recipe.source.commit !== sourceCommit ||
+    JSON.stringify(recipe.source.version) !== JSON.stringify(sourceVersion)
+  ) throw new Error("recipe source does not match build manifest source");
   return {
     schemaVersion: BUILD_MANIFEST_SCHEMA_VERSION,
     identity: hash(root.identity, "identity"),
+    recipe,
     source: {
       selector: text(source.selector, "source.selector"),
       version: sourceVersion,
@@ -187,6 +195,7 @@ function buildIdentity(value: unknown): BuildIdentityInput {
     "generator",
     "jobs",
     "cmakePrefixPath",
+    "cpu",
   ]);
   const tools = object(root.tools, "configuration.tools", [
     "cmake",
@@ -216,6 +225,9 @@ function buildIdentity(value: unknown): BuildIdentityInput {
     cmakePrefixPath: typeof options.cmakePrefixPath === "string"
       ? options.cmakePrefixPath
       : invalid("configuration.options.cmakePrefixPath must be a string"),
+    cpu: options.cpu === "baseline" || options.cpu === "native"
+      ? options.cpu
+      : invalid("configuration.options.cpu must be baseline or native"),
   };
   return {
     sourceCommit: commit(root.sourceCommit, "configuration.sourceCommit"),
@@ -241,20 +253,25 @@ function identityTool(value: unknown, path: string): { path: string; version: st
 }
 
 function command(value: unknown, path: string): CommandRecord {
-  const item = object(value, path, ["executable", "args", "cwd", "env"]);
+  const item = object(value, path, ["executable", "args", "cwd", "env", "clearEnv"]);
+  equal(item.clearEnv, true, `${path}.clearEnv`);
   if (!Array.isArray(item.args) || !item.args.every((value) => typeof value === "string")) {
     throw new Error(`${path}.args must be an array of strings`);
   }
   const envObject = object(item.env, `${path}.env`, null);
   const env: Record<string, string> = {};
   for (const key of Object.keys(envObject).sort()) {
-    env[key] = text(envObject[key], `${path}.env.${key}`);
+    if (typeof envObject[key] !== "string") {
+      throw new Error(`${path}.env.${key} must be a string`);
+    }
+    env[key] = envObject[key] as string;
   }
   return {
     executable: text(item.executable, `${path}.executable`),
     args: [...item.args] as string[],
     cwd: text(item.cwd, `${path}.cwd`),
     env,
+    clearEnv: true,
   };
 }
 
