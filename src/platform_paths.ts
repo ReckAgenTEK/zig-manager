@@ -1,4 +1,5 @@
 import { isAbsolute, join, relative, resolve } from "@std/path";
+import { GLOBAL_PROFILE_FILE_NAME } from "./global_profile.ts";
 
 export type PlatformPathPlatform = "linux" | "darwin" | "windows";
 
@@ -27,8 +28,10 @@ export class PlatformPaths {
   readonly configFile: string;
   readonly catalogFile: string;
   readonly scopesFile: string;
+  readonly globalProfileFile: string;
   readonly locksDir: string;
   readonly shimsDir: string;
+  readonly globalBinDir: string;
   readonly resolverDir: string;
   readonly installsDir: string;
   readonly profilesDir: string;
@@ -75,8 +78,10 @@ export class PlatformPaths {
     this.configFile = child(this.configRoot, "config.json");
     this.catalogFile = child(this.stateRoot, "catalog.json");
     this.scopesFile = child(this.stateRoot, "scopes.json");
+    this.globalProfileFile = child(this.stateRoot, GLOBAL_PROFILE_FILE_NAME);
     this.locksDir = child(this.stateRoot, "locks");
     this.shimsDir = child(this.dataRoot, "shims");
+    this.globalBinDir = denoGlobalBinPath(input.env.DENO_INSTALL_ROOT, this.home);
     this.resolverDir = this.shimsDir;
     this.installsDir = child(this.dataRoot, "installs");
     this.profilesDir = child(this.dataRoot, "profiles");
@@ -121,6 +126,14 @@ function managerXdgPath(value: string | undefined, home: string, fallback: strin
     base = child(home, fallback);
   }
   return child(base, "zig-manager");
+}
+
+function denoGlobalBinPath(value: string | undefined, home: string): string {
+  const configured = nonEmpty(value);
+  const root = configured === undefined
+    ? child(home, ".deno")
+    : normalizeAbsolutePath(configured, "DENO_INSTALL_ROOT");
+  return child(root, "bin");
 }
 
 function child(root: string, ...segments: string[]): string {

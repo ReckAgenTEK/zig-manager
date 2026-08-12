@@ -134,6 +134,36 @@
         "commitAbbreviation": { "type": "string", "pattern": "^[0-9a-f]{4,64}$" }
       }
     },
+    "zlsSourceVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "declaredVersion",
+        "base",
+        "text",
+        "versionString",
+        "taggedAncestor",
+        "commitsAfterTag",
+        "commitAbbreviation"
+      ],
+      "properties": {
+        "kind": { "enum": ["release", "development"] },
+        "declaredVersion": { "$ref": "#/$defs/text" },
+        "base": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "text": { "$ref": "#/$defs/text" },
+        "versionString": { "$ref": "#/$defs/text" },
+        "taggedAncestor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "commitsAfterTag": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "commitAbbreviation": { "type": "string", "pattern": "^[0-9a-f]{4,64}$" }
+      }
+    },
     "resolvedRef": {
       "type": "object",
       "additionalProperties": false,
@@ -144,6 +174,12 @@
       }
     },
     "resolvedSource": {
+      "oneOf": [
+        { "$ref": "#/$defs/resolvedLegacySource" },
+        { "$ref": "#/$defs/resolvedZlsSource" }
+      ]
+    },
+    "resolvedLegacySource": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -164,6 +200,38 @@
         "commit": { "$ref": "#/$defs/commit" },
         "version": { "$ref": "#/$defs/text" },
         "versionMetadata": { "$ref": "#/$defs/sourceVersion" },
+        "resolvedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "resolvedZlsSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "repository",
+        "requestedSelector",
+        "resolvedRef",
+        "commit",
+        "version",
+        "versionMetadata",
+        "resolvedAt"
+      ],
+      "properties": {
+        "component": { "const": "zls" },
+        "repository": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identity", "url"],
+          "properties": {
+            "identity": { "const": "github/zls" },
+            "url": { "const": "https://github.com/zigtools/zls.git" }
+          }
+        },
+        "requestedSelector": { "$ref": "#/$defs/text" },
+        "resolvedRef": { "$ref": "#/$defs/resolvedRef" },
+        "commit": { "$ref": "#/$defs/commit" },
+        "version": { "$ref": "#/$defs/text" },
+        "versionMetadata": { "$ref": "#/$defs/zlsSourceVersion" },
         "resolvedAt": { "$ref": "#/$defs/timestamp" }
       }
     },

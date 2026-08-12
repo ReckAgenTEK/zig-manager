@@ -3,11 +3,15 @@ import { ZigOperationAbortedError } from "./errors.ts";
 import {
   type BuildRecipeDependency,
   type BuildRecipeRepository,
-  validateZigBuildRecipe,
-  type ZigBuildRecipeV1,
+  type BuildRecipeV1,
+  isZlsBuildRecipe,
+  validateBuildRecipe,
 } from "./build_recipe.ts";
 import { type Elf64X86_64Info, inspectElf64X86_64 } from "./elf.ts";
 import { validateZigSourceVersion } from "./source_version.ts";
+import type { ZigSourceVersion } from "./types.ts";
+import { type ResolvedZlsSource, validateResolvedZlsSource } from "./zls_source_workspace.ts";
+import type { ZlsSourceVersion } from "./zls_source_version.ts";
 import {
   assertPathContained,
   atomicWriteJson,
@@ -42,10 +46,10 @@ export interface InstallSourceIdentity {
   readonly repository: SourceRepositoryIdentity;
   readonly commit: string;
   readonly version: string;
-  readonly versionMetadata: ZigBuildRecipeV1["source"]["version"];
+  readonly versionMetadata: ZigSourceVersion | ZlsSourceVersion;
 }
 
-export interface ResolvedSource {
+export interface LegacyResolvedSource {
   readonly component: InstallComponent;
   readonly repository: SourceRepositoryIdentity;
   readonly requestedSelector: string;
@@ -55,14 +59,16 @@ export interface ResolvedSource {
   };
   readonly commit: string;
   readonly version: string;
-  readonly versionMetadata: ZigBuildRecipeV1["source"]["version"];
+  readonly versionMetadata: ZigSourceVersion;
   readonly resolvedAt: string;
 }
+
+export type ResolvedSource = LegacyResolvedSource | ResolvedZlsSource;
 
 export type InstallDependency = BuildRecipeDependency;
 
 /** The complete canonical component recipe is the install identity. */
-export type InstallIdentityV1 = ZigBuildRecipeV1;
+export type InstallIdentityV1 = BuildRecipeV1;
 
 export interface InstallCommandRecord {
   readonly executable: string;
@@ -225,6 +231,16 @@ export function validateTimestamp(value: unknown, path: string): string {
 }
 
 export function validateResolvedSource(value: unknown, path = "source"): ResolvedSource {
+  const discriminator = looseObject(value, path);
+  if (discriminator.component === "zls") return validateResolvedZlsSource(value, path);
+  return validateLegacyResolvedSource(value, path, false);
+}
+
+function validateLegacyResolvedSource(
+  value: unknown,
+  path: string,
+  allowLegacyZls: boolean,
+): LegacyResolvedSource {
   const root = strictObject(value, path, [
     "component",
     "repository",
@@ -236,6 +252,9 @@ export function validateResolvedSource(value: unknown, path = "source"): Resolve
     "resolvedAt",
   ]);
   const component = validateInstallComponent(root.component, `${path}.component`);
+  if (component !== "zig" && !allowLegacyZls) {
+    throw new TypeError(`${path}.component must be 'zig'`);
+  }
   const repository = sourceRepository(root.repository, `${path}.repository`);
   const resolvedRef = strictObject(root.resolvedRef, `${path}.resolvedRef`, ["kind", "value"]);
   const kind = resolvedRef.kind;
@@ -271,7 +290,7 @@ export function validateResolvedSource(value: unknown, path = "source"): Resolve
 }
 
 export function validateInstallIdentity(value: unknown, path = "identity"): InstallIdentityV1 {
-  return validateZigBuildRecipe(value, path);
+  return validateBuildRecipe(value, path);
 }
 
 export async function computeInstallationId(identity: InstallIdentityV1): Promise<string> {
@@ -300,13 +319,12 @@ export function validateInstallManifest(value: unknown): InstallManifestV3 {
   if (identity.component !== component) {
     throw new TypeError("identity.component must equal component");
   }
-  const source = validateResolvedSource(root.source);
-  if (
-    canonicalJson(source.repository) !== canonicalJson(identity.source.repository) ||
-    source.component !== identity.component || source.commit !== identity.source.commit ||
-    canonicalJson(source.versionMetadata) !== canonicalJson(identity.source.version) ||
-    source.version !== identity.source.version.text
-  ) {
+  const source = isZlsBuildRecipe(identity)
+    ? validateResolvedZlsSource(root.source)
+    : identity.component === "zls"
+    ? validateLegacyResolvedSource(root.source, "source", true)
+    : validateResolvedSource(root.source);
+  if (!sourceMatchesIdentity(source, identity)) {
     throw new TypeError("source must match identity.source");
   }
   const dependencies = dependencyList(root.dependencies, "dependencies", component);
@@ -970,60 +988,58 @@ export class InstallStore {
         },
       );
     }
-    if (manifest.component === "zig") {
-      let format: Elf64X86_64Info;
+    let format: Elf64X86_64Info;
+    try {
+      format = await inspectElf64X86_64(executablePath);
+    } catch (cause) {
+      throw new InstallStoreError(
+        "INSTALL_CORRUPT",
+        `Manifest ${manifest.component} executable is not ELF64 little-endian x86_64: ${executablePath}`,
+        { executablePath },
+        { cause },
+      );
+    }
+    if (canonicalJson(format) !== canonicalJson(manifest.executable.format)) {
+      throw new InstallStoreError(
+        "INSTALL_CORRUPT",
+        `Manifest executable format metadata does not match: ${executablePath}`,
+        { executablePath },
+      );
+    }
+    if (manifest.runtime.linkage === "dynamic") {
+      const interpreter = format.interpreter;
+      if (interpreter === null) {
+        throw new InstallStoreError(
+          "INSTALL_CORRUPT",
+          `Dynamic executable does not record an ELF interpreter: ${executablePath}`,
+          { executablePath },
+        );
+      }
+      const candidateInfo = await safeLstat(interpreter, "INSTALL_CORRUPT");
+      if (!candidateInfo.isFile || candidateInfo.isSymlink) {
+        throw new InstallStoreError(
+          "INSTALL_CORRUPT",
+          `ELF interpreter is not a physical regular file: ${interpreter}`,
+          { interpreter },
+        );
+      }
+      let physicalInterpreter: string;
       try {
-        format = await inspectElf64X86_64(executablePath);
+        physicalInterpreter = resolve(await Deno.realPath(interpreter));
       } catch (cause) {
         throw new InstallStoreError(
           "INSTALL_CORRUPT",
-          `Manifest Zig executable is not ELF64 little-endian x86_64: ${executablePath}`,
-          { executablePath },
+          `ELF interpreter could not be physically resolved: ${interpreter}`,
+          { interpreter },
           { cause },
         );
       }
-      if (canonicalJson(format) !== canonicalJson(manifest.executable.format)) {
+      if (physicalInterpreter !== manifest.runtime.interpreter.path) {
         throw new InstallStoreError(
           "INSTALL_CORRUPT",
-          `Manifest executable format metadata does not match: ${executablePath}`,
-          { executablePath },
+          `Runtime interpreter does not match the ELF interpreter: ${interpreter}`,
+          { interpreter, physicalInterpreter, recorded: manifest.runtime.interpreter.path },
         );
-      }
-      if (manifest.runtime.linkage === "dynamic") {
-        const interpreter = format.interpreter;
-        if (interpreter === null) {
-          throw new InstallStoreError(
-            "INSTALL_CORRUPT",
-            `Dynamic executable does not record an ELF interpreter: ${executablePath}`,
-            { executablePath },
-          );
-        }
-        const candidateInfo = await safeLstat(interpreter, "INSTALL_CORRUPT");
-        if (!candidateInfo.isFile || candidateInfo.isSymlink) {
-          throw new InstallStoreError(
-            "INSTALL_CORRUPT",
-            `ELF interpreter is not a physical regular file: ${interpreter}`,
-            { interpreter },
-          );
-        }
-        let physicalInterpreter: string;
-        try {
-          physicalInterpreter = resolve(await Deno.realPath(interpreter));
-        } catch (cause) {
-          throw new InstallStoreError(
-            "INSTALL_CORRUPT",
-            `ELF interpreter could not be physically resolved: ${interpreter}`,
-            { interpreter },
-            { cause },
-          );
-        }
-        if (physicalInterpreter !== manifest.runtime.interpreter.path) {
-          throw new InstallStoreError(
-            "INSTALL_CORRUPT",
-            `Runtime interpreter does not match the ELF interpreter: ${interpreter}`,
-            { interpreter, physicalInterpreter, recorded: manifest.runtime.interpreter.path },
-          );
-        }
       }
     }
     for (const library of manifest.paths.libraries) {
@@ -1130,6 +1146,17 @@ function stableManifestProjection(manifestValue: InstallManifestV3): unknown {
     dependencies: manifest.dependencies,
     verifierContractVersion: manifest.verifierContractVersion,
   };
+}
+
+function sourceMatchesIdentity(source: ResolvedSource, identity: InstallIdentityV1): boolean {
+  if (isZlsBuildRecipe(identity)) {
+    return source.component === "zls" &&
+      canonicalJson(source) === canonicalJson(identity.source.resolved);
+  }
+  return canonicalJson(source.repository) === canonicalJson(identity.source.repository) &&
+    source.component === identity.component && source.commit === identity.source.commit &&
+    canonicalJson(source.versionMetadata) === canonicalJson(identity.source.version) &&
+    source.version === identity.source.version.text;
 }
 
 function sourceRepository(value: unknown, path: string): SourceRepositoryIdentity {

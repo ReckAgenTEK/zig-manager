@@ -149,6 +149,27 @@ Deno.test("incompatible versions and missing development requirements remain blo
   }
 });
 
+Deno.test("package-owned development library aliases resolve to physical files", async () => {
+  const root = await Deno.makeTempDir({ prefix: "zig-manager-doctor-library-alias-" });
+  try {
+    const prefix = await createDevelopmentFiles(root);
+    const alias = join(prefix, "lib", "liblldCommon.a");
+    const physical = join(root, "system-lib", "liblldCommon.so.21.1");
+    await Deno.mkdir(join(root, "system-lib"));
+    await Deno.writeTextFile(physical, "fixture\n");
+    await Deno.remove(alias);
+    await Deno.symlink(physical, alias);
+
+    const result = await inspect(root, new FakeProcessRunner(prefix), prefix);
+    assertEquals(result.buildReady, true);
+    assertFalse(
+      result.findings.some((finding) => finding.code === "ZIG_DEVELOPMENT_FILES_MISSING"),
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
 Deno.test("source-ref failures are blocking structured findings", async () => {
   const root = await Deno.makeTempDir({ prefix: "zig-manager-doctor-source-ref-" });
   try {
@@ -337,6 +358,15 @@ Deno.test("host, resource, session, and fallback diagnostics retain warning/erro
       finding.code === "ZIG_SHELL_PRECEDENCE" && finding.severity === "info"
     ),
   );
+  const persistent = await inspectSessionDiagnostics({
+    env: { PATH: "/deno/bin:/fallback" },
+    expectedShimDirectory: "/managed/shims",
+    persistentShimDirectory: "/deno/bin",
+    fallbackPath: "/fallback/zig",
+    pinRelevant: true,
+    runner,
+  });
+  assertFalse(persistent.findings.some((finding) => finding.code === "ZIG_SESSION_INACTIVE"));
   const missingFallback = await inspectSessionDiagnostics({
     env: { PATH: "/empty" },
     expectedShimDirectory: "/managed/shims",

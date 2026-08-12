@@ -530,9 +530,11 @@ export interface ArtifactStatus {
 }
 
 export interface ZigManagerStatus {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
   readonly lookupPath: string;
   readonly mode: "managed" | "fallback";
+  /** Present in schema v2 and identifies the winning selection layer. */
+  readonly selection?: "local" | "global" | "fallback";
   readonly scopeRoot: string | null;
   readonly pinPath: string | null;
   readonly profileId: string | null;
@@ -541,6 +543,10 @@ export interface ZigManagerStatus {
   readonly version: string | null;
   readonly commit: string | null;
   readonly executable: string | null;
+  /** Present in schema v2. The top-level component fields remain Zig aliases. */
+  readonly zig?: ZigManagerToolStatus;
+  /** Present in schema v2. Managed profiles never borrow ZLS from another layer. */
+  readonly zls?: ZigManagerToolStatus | null;
   readonly update: {
     readonly checked: boolean;
     readonly moving: boolean;
@@ -564,10 +570,12 @@ export interface UninstallOptions extends OperationOptions {}
 
 export interface ScopeOperationOptions extends OperationOptions {
   readonly path?: string;
+  readonly global?: boolean;
 }
 
 export interface UseOptions extends BuildOptions {
   readonly path?: string;
+  readonly global?: boolean;
 }
 
 export interface CurrentOptions extends ScopeOperationOptions {
@@ -579,6 +587,7 @@ export interface DoctorOptions extends OperationOptions {
   readonly verify?: boolean;
   readonly strict?: boolean;
   readonly path?: string;
+  readonly global?: boolean;
 }
 
 export interface GcOptions extends OperationOptions {
@@ -588,7 +597,8 @@ export interface GcOptions extends OperationOptions {
   readonly profiles?: boolean;
 }
 
-export interface RepairOptions extends ScopeOperationOptions {
+export interface RepairOptions extends OperationOptions {
+  readonly path?: string;
   readonly unlock?: string;
 }
 
@@ -604,6 +614,7 @@ export interface DocsOptions extends OperationOptions {
 export interface RunOptions extends OperationOptions {
   readonly selector?: string;
   readonly path?: string;
+  readonly global?: boolean;
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string>>;
   readonly stdin?: "inherit" | "null";
@@ -619,13 +630,20 @@ export interface ZigManagerHost {
 }
 
 export interface ZigInstallResult {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
   readonly selector: string;
+  /** Zig compatibility aliases retained for existing facade consumers. */
   readonly installationId: string;
   readonly version: string;
   readonly commit: string;
   readonly executable: string;
   readonly reused: boolean;
+  /** Present in schema v2. */
+  readonly profileId?: string;
+  /** Present in schema v2. */
+  readonly zig?: ZigManagedComponentResult;
+  /** Present in schema v2; null is reserved for an explicitly selected legacy profile. */
+  readonly zls?: ZigManagedComponentResult | null;
 }
 
 export interface ZigUninstallResult {
@@ -639,25 +657,36 @@ export interface ZigUninstallResult {
 
 export interface ZigUseResult extends ZigInstallResult {
   readonly profileId: string;
-  readonly scopeRoot: string;
+  readonly scopeRoot: string | null;
   readonly pinPath: string;
   readonly activationRequired: boolean;
+  /** Present in schema v2. */
+  readonly selection?: "local" | "global";
 }
 
 export interface ZigUnuseResult {
-  readonly schemaVersion: 1;
-  readonly scopeRoot: string;
+  readonly schemaVersion: 1 | 2;
+  readonly scopeRoot: string | null;
   readonly pinPath: string;
   readonly removed: true;
+  /** Present in schema v2. */
+  readonly selection?: "local" | "global";
 }
 
 export interface ZigSyncResult {
-  readonly schemaVersion: 1;
-  readonly scopeRoot: string;
+  readonly schemaVersion: 1 | 2;
+  readonly scopeRoot: string | null;
   readonly profileId: string;
+  /** Zig compatibility aliases retained for existing facade consumers. */
   readonly installationId: string;
   readonly executable: string;
   readonly rebuilt: boolean;
+  /** Present in schema v2. */
+  readonly selection?: "local" | "global";
+  /** Present in schema v2. */
+  readonly zig?: ZigManagedComponentResult;
+  /** Present in schema v2; null denotes a strict legacy profile without paired provenance. */
+  readonly zls?: ZigManagedComponentResult | null;
 }
 
 export interface ZigUpdateResult extends ZigUseResult {
@@ -667,6 +696,8 @@ export interface ZigUpdateResult extends ZigUseResult {
 }
 
 export interface ZigListInstallation {
+  /** Present in schema v2. */
+  readonly component?: "zig" | "zls";
   readonly installationId: string;
   readonly version: string;
   readonly commit: string;
@@ -676,15 +707,21 @@ export interface ZigListInstallation {
 
 export interface ZigListProfile {
   readonly profileId: string;
+  /** Present in schema v2. */
+  readonly profileSchemaVersion?: 1 | 2;
   readonly selector: string;
   readonly installationId: string;
   readonly version: string;
   readonly commit: string;
   readonly createdAt: string;
+  /** Present in schema v2. */
+  readonly zig?: Omit<ZigManagedComponentResult, "reused">;
+  /** Present in schema v2. */
+  readonly zls?: Omit<ZigManagedComponentResult, "reused"> | null;
 }
 
 export interface ZigListResult {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
   readonly installations: readonly ZigListInstallation[];
   readonly profiles: readonly ZigListProfile[];
   readonly remote: readonly ZigSemanticVersion[] | null;
@@ -752,12 +789,19 @@ export interface ZigRepairRegistryStatus extends ZigScopeRegistryStatus {
 }
 
 export interface ZigRepairResult {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
   readonly catalogRebuilt: boolean;
   readonly shimsReinstalled: boolean;
   readonly scopeValid: boolean | null;
   readonly unlocked: string | null;
   readonly registry: ZigRepairRegistryStatus;
+  /** Present in schema v2 after strict global-pointer reconciliation. */
+  readonly global?: {
+    readonly pointerPath: string;
+    readonly profileId: string | null;
+    readonly valid: boolean | null;
+    readonly removed?: boolean;
+  };
 }
 
 export interface ZigDanglingScopePin {
@@ -769,18 +813,37 @@ export interface ZigDanglingScopePin {
 }
 
 export interface ZigPurgeResult {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
   readonly dryRun: boolean;
   readonly roots: readonly string[];
   readonly registry: ZigScopeRegistryStatus;
   readonly danglingPins: readonly ZigDanglingScopePin[];
+  /** Present in schema v2 and records the manager-owned pointer observed before purge. */
+  readonly globalProfileId?: string | null;
+  /** Present in schema v2 and records owned persistent resolver removal. */
+  readonly persistentResolvers?: {
+    readonly zig: boolean;
+    readonly zls: boolean;
+  };
 }
 
-export interface SetupResult {
-  readonly source: SourceSelectionState;
-  readonly doctor: ZigDoctorResult;
-  readonly build: BuildResult;
-  readonly docs: DocsResult;
+export interface ZigManagedComponentResult {
+  readonly component: "zig" | "zls";
+  readonly selector: string;
+  readonly installationId: string;
+  readonly version: string;
+  readonly commit: string;
+  readonly executable: string;
+  readonly reused: boolean;
+}
+
+export interface ZigManagerToolStatus {
+  readonly component: "zig" | "zls";
+  readonly installationId: string | null;
+  readonly selector: string | null;
+  readonly version: string | null;
+  readonly commit: string | null;
+  readonly executable: string | null;
 }
 
 export type {

@@ -1,5 +1,6 @@
 import { basename, dirname, join } from "@std/path";
 import { dirname as windowsDirname, join as windowsJoin } from "@std/path/windows";
+import { ZIG_BUILD_CONTRACT_VERSION } from "./build_recipe.ts";
 import { MINIMUM_GIT_VERSION, SUPPORTED_DOCS_ASSET_CONTRACT } from "./constants.ts";
 import { ZigReleaseUnsupportedError } from "./errors.ts";
 import { ZIG_CMAKE_SOURCE_CONTRACT, type ZigCMakeSourceContract } from "./source_version.ts";
@@ -156,7 +157,7 @@ const PROFILE_BUILD_TYPE: Readonly<
 
 export class ZigCMake21Adapter implements ReleaseAdapter {
   readonly id: string = "zig-cmake-llvm21-autodoc-v1";
-  readonly buildContractVersion = 1;
+  readonly buildContractVersion = ZIG_BUILD_CONTRACT_VERSION;
   readonly verifierContractVersion = 2;
   readonly requirements: ReleaseRequirements = {
     defaultCmakePrefix: {
@@ -415,6 +416,7 @@ export class ZigCMake21Adapter implements ReleaseAdapter {
       `-DCMAKE_PREFIX_PATH=${context.options.cmakePrefixPath}`,
       `-DCMAKE_PROGRAM_PATH=${pathDirname(llvmConfig, context.platform)}`,
       "-DZIG_USE_LLVM_CONFIG=ON",
+      "-DZIG_EXTRA_BUILD_ARGS=-Dno-langref",
       `-DZIG_VERSION=${context.version.text}`,
       `-DCMAKE_C_FLAGS=${context.options.cpu === "native" ? "-march=native" : ""}`,
       `-DCMAKE_CXX_FLAGS=${context.options.cpu === "native" ? "-march=native" : ""}`,
@@ -684,6 +686,7 @@ function supportsSourceContract(contract: ZigCMakeSourceContract, llvmMajor: num
     contract.llvmMajor === llvmMajor &&
     contract.clangMajor === llvmMajor &&
     contract.lldMajor === llvmMajor &&
+    contract.noLangrefSupport !== null &&
     contract.llvmCompatibility === `llvm${llvmMajor}-v1`;
 }
 

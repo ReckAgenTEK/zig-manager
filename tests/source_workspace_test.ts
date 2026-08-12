@@ -702,10 +702,23 @@ class FakeSourceRef implements SourceWorkspaceSourceRef {
         `find_package(llvm ${metadata.llvmMajor})`,
         `find_package(clang ${metadata.llvmMajor})`,
         `find_package(lld ${metadata.llvmMajor})`,
+        "set(ZIG_BUILD_ARGS",
+        ...(metadata.llvmMajor === 21 ? ["  -Dno-langref"] : []),
+        ")",
+        'set(ZIG_EXTRA_BUILD_ARGS "" CACHE STRING "Extra zig build args")',
+        "if(ZIG_EXTRA_BUILD_ARGS)",
+        "  list(APPEND ZIG_BUILD_ARGS ${ZIG_EXTRA_BUILD_ARGS})",
+        "endif()",
         "install(SCRIPT cmake/install.cmake)",
         "",
       ].join("\n"),
     );
+    if (metadata.llvmMajor !== 21) {
+      await Deno.writeTextFile(
+        join(this.checkoutPath, "build.zig"),
+        'const skip_install_langref = b.option(bool, "no-langref", "skip copying of langref") orelse false;\n',
+      );
+    }
     if (metadata.llvmMajor === 22) {
       const sourceRoot = join(this.checkoutPath, "src");
       await Deno.mkdir(sourceRoot, { recursive: true });

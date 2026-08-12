@@ -113,7 +113,7 @@ Deno.test("BuildManifest install identity is deterministic and excludes output p
     });
     const contractAdapter = {
       id: adapter.id,
-      buildContractVersion: 2,
+      buildContractVersion: adapter.buildContractVersion + 1,
       verifierContractVersion: 2,
     };
     const contractRecipe = { ...manifest.recipe, adapter: contractAdapter };
@@ -281,6 +281,17 @@ Deno.test("canonical recipe identity changes for every material input and reject
       TypeError,
       "nonempty",
     );
+    const missingNoLangref = structuredClone(base) as unknown as Mutable<ZigBuildRecipeV1>;
+    missingNoLangref.cmake.configureArguments = missingNoLangref.cmake.configureArguments.filter(
+      (argument) => argument !== "-DZIG_EXTRA_BUILD_ARGS=-Dno-langref",
+    );
+    assertThrows(
+      () => validateZigBuildRecipe(missingNoLangref),
+      TypeError,
+      "disable language-reference installation canonically",
+    );
+    missingNoLangref.adapter.buildContractVersion = 1;
+    validateZigBuildRecipe(missingNoLangref);
   });
 });
 
@@ -296,6 +307,20 @@ Deno.test("bare build tools resolve through captured PATH to physical fingerprin
       assertEquals(tool.sha256.length, 64);
       assert(tool.queries.length > 0);
     }
+  } finally {
+    await remove(root);
+  }
+});
+
+Deno.test("development library aliases fingerprint their physical targets", async () => {
+  const root = await Deno.makeTempDir({ prefix: "zig-manager-recipe-library-alias-" });
+  try {
+    const source = sourceFixture();
+    const recipe = await createRecipeFixture(root, source, new ZigCMake21Adapter(), false, true);
+    const alias = join(root, "toolchain", "lib", "liblldCommon.a");
+    const physical = await Deno.realPath(alias);
+    assert(recipe.development.files.some((file) => file.path === physical));
+    assert(!recipe.development.files.some((file) => file.path === alias));
   } finally {
     await remove(root);
   }
@@ -723,8 +748,18 @@ async function createRecipeFixture(
   source: ResolvedSource,
   adapter: ZigCMake21Adapter,
   bareTools = false,
+  linkedLld = false,
 ): Promise<BuildManifest["recipe"]> {
   const prefix = await createDevelopmentFiles(root);
+  if (linkedLld) {
+    const alias = join(prefix, "lib", "liblldCommon.a");
+    const physicalDirectory = join(root, "system-lib");
+    const physical = join(physicalDirectory, "liblldCommon.so.21.1");
+    await Deno.mkdir(physicalDirectory);
+    await Deno.writeTextFile(physical, "fixture\n");
+    await Deno.remove(alias);
+    await Deno.symlink(physical, alias);
+  }
   const executable = (name: string) => join(root, "tools", name);
   const probe = (name: string, version: string): ToolProbeResult => ({
     name,

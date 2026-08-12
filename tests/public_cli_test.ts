@@ -22,16 +22,22 @@ import type {
 } from "../src/types.ts";
 
 const ID = "a".repeat(64);
+const ZLS_ID = "d".repeat(64);
 const PROFILE = "b".repeat(64);
 const COMMIT = "c".repeat(40);
+const ZLS_COMMIT = "e".repeat(40);
 
-Deno.test("public API exports the directory-scoped facade and stores", () => {
+Deno.test("public API exports the paired local/global facade and stores", () => {
   assertEquals(typeof publicApi.ZigManager, "function");
   assertEquals(typeof publicApi.PlatformPaths, "function");
   assertEquals(typeof publicApi.ScopeResolver, "function");
   assertEquals(typeof publicApi.InstallStore, "function");
   assertEquals(typeof publicApi.ToolchainProfileStore, "function");
   assertEquals(typeof publicApi.SessionShimManager, "function");
+  assertEquals(typeof publicApi.GlobalProfileStore, "function");
+  assertEquals(typeof publicApi.ZlsSourceWorkspace, "function");
+  assertEquals(typeof publicApi.prepareZlsBuildRecipe, "function");
+  assertEquals(typeof publicApi.installBuiltZls, "function");
   assertEquals(publicApi.BUILD_MANIFEST_SCHEMA_VERSION, 2);
   assertEquals(Object.keys(publicApi).includes("DenoProcessRunner"), false);
 });
@@ -116,7 +122,63 @@ Deno.test("CLI parses build options and emits activation reminder only for human
     options: { path: "/scope", profile: "debug", jobs: 7 },
   }]);
   assertStringIncludes(output.stdout(), "/scope");
+  assertStringIncludes(output.stdout(), "zig: 0.16.0");
+  assertStringIncludes(output.stdout(), "zls: 0.16.0");
   assertStringIncludes(output.stderr(), 'eval "$(zm shell activate bash)"');
+});
+
+Deno.test("CLI forwards global selection across every scope-aware command", async () => {
+  const fake = new FakeCliManager();
+  const commands: readonly (readonly string[])[] = [
+    ["use", "latest", "-g", "--json"],
+    ["use", "--installed", PROFILE, "--global", "--json"],
+    ["unuse", "-g", "--json"],
+    ["sync", "--global", "--json"],
+    ["update", "-g", "--json"],
+    ["current", "--global", "--json"],
+    ["status", "-g", "--json"],
+    ["which", "zls", "--global", "--json"],
+    ["run", "-g", "--", "version"],
+    ["doctor", "--global", "--json"],
+    ["shell", "status", "--global", "--json"],
+  ];
+  for (const args of commands) {
+    const output = capture();
+    assertEquals(await runCli(args, output.io, () => fake), 0, output.stderr());
+  }
+  assertEquals(fake.calls, [
+    { method: "use", selector: "latest", options: { global: true } },
+    { method: "useInstalled", id: PROFILE, global: true },
+    { method: "unuse", global: true },
+    { method: "sync", global: true },
+    { method: "update", global: true },
+    { method: "current", global: true, check: false },
+    { method: "current", global: true, check: false },
+    { method: "which", tool: "zls", global: true },
+    { method: "run", args: ["version"], selector: undefined, global: true },
+    { method: "doctor", selector: undefined, global: true },
+    { method: "shellStatus", global: true },
+  ]);
+});
+
+Deno.test("CLI rejects ambiguous global scope options before calling the facade", async () => {
+  for (
+    const args of [
+      ["use", "latest", "--global", "--path", "/scope", "--json"],
+      ["current", "-g", "--global", "--json"],
+      ["run", "latest", "--global", "--", "version"],
+    ]
+  ) {
+    const fake = new FakeCliManager();
+    const output = capture();
+    assertEquals(await runCli(args, output.io, () => fake), 1);
+    if (output.stdout() === "") {
+      assertStringIncludes(output.stderr(), "ZIG_INVALID_ARGUMENT");
+    } else {
+      assertEquals(JSON.parse(output.stdout()).error.code, "ZIG_INVALID_ARGUMENT");
+    }
+    assertEquals(fake.calls, []);
+  }
 });
 
 Deno.test("shell code is the only activation stdout and JSON activation is rejected on stderr", async () => {
@@ -392,7 +454,7 @@ class FakeCliManager implements CliManager {
 
   list() {
     return Promise.resolve({
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       installations: [],
       profiles: [],
       remote: null,
@@ -419,68 +481,107 @@ class FakeCliManager implements CliManager {
 
   use(selector: string, options: UseOptions = {}): Promise<ZigUseResult> {
     this.calls.push({ method: "use", selector, options });
-    return Promise.resolve(useResult(selector, options.path ?? "/scope"));
+    return Promise.resolve(useResult(selector, options.global ? null : options.path ?? "/scope"));
   }
 
   useInstalled(id: string, options: ScopeOperationOptions = {}): Promise<ZigUseResult> {
-    this.calls.push({ method: "useInstalled", id, path: options.path });
-    return Promise.resolve(useResult("0.16.0", options.path ?? "/scope"));
+    this.calls.push({
+      method: "useInstalled",
+      id,
+      ...(options.path === undefined ? {} : { path: options.path }),
+      ...(options.global ? { global: true } : {}),
+    });
+    return Promise.resolve(
+      useResult("0.16.0", options.global ? null : options.path ?? "/scope"),
+    );
   }
 
   unuse(options: ScopeOperationOptions = {}) {
-    this.calls.push({ method: "unuse", path: options.path });
+    this.calls.push({
+      method: "unuse",
+      ...(options.path === undefined ? {} : { path: options.path }),
+      ...(options.global ? { global: true } : {}),
+    });
+    const global = options.global === true;
     return Promise.resolve({
-      schemaVersion: 1 as const,
-      scopeRoot: options.path ?? "/scope",
-      pinPath: "/scope/.zig-manager/toolchain",
+      schemaVersion: 2 as const,
+      selection: global ? "global" as const : "local" as const,
+      scopeRoot: global ? null : options.path ?? "/scope",
+      pinPath: global ? "/state/global-profile" : "/scope/.zig-manager/toolchain",
       removed: true as const,
     });
   }
 
-  sync() {
+  sync(options: UseOptions = {}) {
+    this.calls.push({ method: "sync", ...(options.global ? { global: true } : {}) });
     return Promise.resolve({
-      schemaVersion: 1 as const,
-      scopeRoot: "/scope",
+      schemaVersion: 2 as const,
+      selection: options.global ? "global" as const : "local" as const,
+      scopeRoot: options.global ? null : "/scope",
       profileId: PROFILE,
       installationId: ID,
       executable: "/managed/zig",
       rebuilt: false,
+      zig: component("zig"),
+      zls: component("zls"),
     });
   }
 
-  update() {
+  update(options: UseOptions = {}) {
+    this.calls.push({ method: "update", ...(options.global ? { global: true } : {}) });
     return Promise.resolve({
-      ...useResult("latest", "/scope"),
+      ...useResult("latest", options.global ? null : "/scope"),
       previousProfileId: PROFILE,
       changed: false,
       immutable: false,
     });
   }
 
-  current(options: { readonly path?: string; readonly check?: boolean } = {}) {
-    this.calls.push({ method: "current", path: options.path, check: options.check });
+  current(
+    options: { readonly path?: string; readonly global?: boolean; readonly check?: boolean } = {},
+  ) {
+    this.calls.push({
+      method: "current",
+      ...(options.path === undefined ? {} : { path: options.path }),
+      ...(options.global ? { global: true } : {}),
+      check: options.check,
+    });
     return Promise.resolve(fallbackStatus(options.path ?? "/cwd"));
   }
 
-  status(options: { readonly path?: string; readonly check?: boolean } = {}) {
+  status(
+    options: { readonly path?: string; readonly global?: boolean; readonly check?: boolean } = {},
+  ) {
     return this.current(options);
   }
 
-  which() {
-    return Promise.resolve("/managed/zig");
+  which(tool: "zig" | "zls" = "zig", options: ScopeOperationOptions = {}) {
+    this.calls.push({ method: "which", tool, ...(options.global ? { global: true } : {}) });
+    return Promise.resolve(`/managed/${tool}`);
   }
 
   async run(args: readonly string[], options: RunOptions = {}): Promise<ProcessResult> {
-    this.calls.push({ method: "run", args: [...args], selector: options.selector });
+    this.calls.push({
+      method: "run",
+      args: [...args],
+      selector: options.selector,
+      ...(options.path === undefined ? {} : { path: options.path }),
+      ...(options.global ? { global: true } : {}),
+    });
     await options.onStdout?.(new TextEncoder().encode("child stdout\n"));
     await options.onStderr?.(new TextEncoder().encode("child stderr\n"));
     return this.runStatus;
   }
 
   doctor(
-    _selector?: string,
+    selector?: string,
     options: DoctorOptions = {},
   ): Promise<ZigManagerDoctorResult> {
+    this.calls.push({
+      method: "doctor",
+      selector,
+      ...(options.global ? { global: true } : {}),
+    });
     const errors = this.doctorFindings.filter((finding) => finding.severity === "error").length;
     const warnings = this.doctorFindings.filter((finding) => finding.severity === "warning").length;
     const info = this.doctorFindings.filter((finding) => finding.severity === "info").length;
@@ -582,7 +683,8 @@ class FakeCliManager implements CliManager {
     return Promise.resolve("unset ZM_SESSION_ACTIVE\n");
   }
 
-  shellStatus() {
+  shellStatus(options: ScopeOperationOptions = {}) {
+    this.calls.push({ method: "shellStatus", ...(options.global ? { global: true } : {}) });
     return Promise.resolve({
       schemaVersion: 2 as const,
       active: false,
@@ -697,32 +799,55 @@ class FakeSignalRuntime implements CliSignalRuntime {
 }
 
 function installResult(selector: string): ZigInstallResult {
+  const zig = component("zig", selector);
+  const zls = component("zls", selector);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     selector,
     installationId: ID,
     version: "0.16.0",
     commit: COMMIT,
     executable: "/managed/zig",
     reused: true,
+    profileId: PROFILE,
+    zig,
+    zls,
   };
 }
 
-function useResult(selector: string, scopeRoot: string): ZigUseResult {
+function useResult(selector: string, scopeRoot: string | null): ZigUseResult {
+  const global = scopeRoot === null;
   return {
     ...installResult(selector),
     profileId: PROFILE,
     scopeRoot,
-    pinPath: `${scopeRoot}/.zig-manager/toolchain`,
+    pinPath: global ? "/state/global-profile" : `${scopeRoot}/.zig-manager/toolchain`,
     activationRequired: true,
+    selection: global ? "global" : "local",
+  };
+}
+
+function component(
+  tool: "zig" | "zls",
+  selector = "0.16.0",
+): NonNullable<ZigInstallResult["zig"]> {
+  return {
+    component: tool,
+    selector,
+    installationId: tool === "zig" ? ID : ZLS_ID,
+    version: "0.16.0",
+    commit: tool === "zig" ? COMMIT : ZLS_COMMIT,
+    executable: `/managed/${tool}`,
+    reused: true,
   };
 }
 
 function fallbackStatus(lookupPath: string): ZigManagerStatus {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     lookupPath,
     mode: "fallback",
+    selection: "fallback",
     scopeRoot: null,
     pinPath: null,
     profileId: null,
@@ -731,6 +856,22 @@ function fallbackStatus(lookupPath: string): ZigManagerStatus {
     version: null,
     commit: null,
     executable: "/usr/bin/zig",
+    zig: {
+      component: "zig",
+      installationId: null,
+      selector: null,
+      version: null,
+      commit: null,
+      executable: "/usr/bin/zig",
+    },
+    zls: {
+      component: "zls",
+      installationId: null,
+      selector: null,
+      version: null,
+      commit: null,
+      executable: "/usr/bin/zls",
+    },
     update: { checked: false, moving: false, available: null, resolvedCommit: null },
   };
 }

@@ -17,10 +17,13 @@ export interface ZigCMakeSourceContract {
   readonly versionOverride: boolean;
   readonly llvmConfigToggle: boolean;
   readonly installScript: boolean;
+  readonly extraBuildArgs: boolean;
+  readonly noLangrefSupport: "cmake-default" | "extra-build-args" | null;
   readonly llvmCompatibility: "llvm21-v1" | "llvm22-v1" | null;
 }
 
 export interface ZigCMakeSourceEvidence {
+  readonly buildZig?: string;
   readonly zigLlvm: string;
   readonly zigLlvmAr: string;
   readonly clangDriver: string;
@@ -45,13 +48,19 @@ export async function readZigSourceMetadata(
 ): Promise<ZigSourceMetadata> {
   const text = await readCmakeLists(checkoutPath);
   const preliminary = parseCmakeZigSourceContract(text);
+  const buildZig = await readOptionalContractSource(checkoutPath, "build.zig");
   const evidence = preliminary.llvmMajor === 22 && preliminary.clangMajor === 22 &&
       preliminary.lldMajor === 22
     ? await readLlvm22SourceEvidence(checkoutPath)
     : undefined;
   return {
     version: deriveZigSourceVersion(parseCmakeZigVersion(text), revision),
-    contract: parseCmakeZigSourceContract(text, evidence),
+    contract: parseCmakeZigSourceContract(text, {
+      buildZig,
+      zigLlvm: evidence?.zigLlvm ?? "",
+      zigLlvmAr: evidence?.zigLlvmAr ?? "",
+      clangDriver: evidence?.clangDriver ?? "",
+    }),
   };
 }
 
@@ -107,6 +116,26 @@ export function parseCmakeZigSourceContract(
     text,
     /^[ \t]*install\s*\(\s*SCRIPT\s+"?cmake\/install\.cmake"?\s*\)[ \t]*(?:#[^\r\n]*)?$/gim,
   );
+  const extraBuildArgs = hasUniqueStatement(
+    text,
+    /^[ \t]*set\s*\(\s*ZIG_EXTRA_BUILD_ARGS\s+""\s+CACHE\s+STRING(?:\s+[^)\r\n]*)?\)[ \t]*(?:#[^\r\n]*)?$/gim,
+  ) && hasUniqueStatement(
+    text,
+    /^[ \t]*list\s*\(\s*APPEND\s+ZIG_BUILD_ARGS\s+\$\{ZIG_EXTRA_BUILD_ARGS\}\s*\)[ \t]*(?:#[^\r\n]*)?$/gim,
+  );
+  const cmakeDisablesLangref = hasUniqueStatement(
+    text,
+    /^[ \t]*-Dno-langref[ \t]*(?:#[^\r\n]*)?$/gim,
+  );
+  const noLangrefBuildOption = hasUniqueStatement(
+    evidence?.buildZig ?? "",
+    /^[ \t]*const\s+skip_install_langref\s*=\s*b\.option\s*\(\s*bool\s*,\s*"no-langref"\s*,[^\r\n]*$/gim,
+  );
+  const noLangrefSupport = cmakeDisablesLangref
+    ? "cmake-default"
+    : extraBuildArgs && noLangrefBuildOption
+    ? "extra-build-args"
+    : null;
   const layout = versionOverride && llvmConfigToggle && installScript
     ? ZIG_CMAKE_SOURCE_CONTRACT
     : null;
@@ -125,6 +154,8 @@ export function parseCmakeZigSourceContract(
     versionOverride,
     llvmConfigToggle,
     installScript,
+    extraBuildArgs,
+    noLangrefSupport,
     llvmCompatibility,
   };
 }

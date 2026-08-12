@@ -525,6 +525,7 @@ export async function inspectHostDiagnostics(
 export async function inspectSessionDiagnostics(input: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly expectedShimDirectory: string;
+  readonly persistentShimDirectory?: string;
   readonly fallbackPath: string | null;
   readonly pinRelevant: boolean;
   readonly runner: ProcessRunner;
@@ -534,6 +535,8 @@ export async function inspectSessionDiagnostics(input: {
   const configuredShimDirectory = input.env.ZM_SHIM_DIR ?? null;
   const basePath = input.env.ZM_BASE_PATH ?? null;
   const firstPath = (input.env.PATH ?? "").split(":", 1)[0] ?? "";
+  const persistentResolverAvailable = input.persistentShimDirectory !== undefined &&
+    (input.env.PATH ?? "").split(":").includes(input.persistentShimDirectory);
   const pathStartsWithShim = firstPath === input.expectedShimDirectory;
   const baseContainsShim = basePath?.split(":").includes(input.expectedShimDirectory) === true;
   const coherent = !active || configuredShimDirectory === input.expectedShimDirectory &&
@@ -557,7 +560,7 @@ export async function inspectSessionDiagnostics(input: {
         "Deactivate and reactivate the Bash session using zig-manager's generated shell code.",
     }));
   }
-  if (!active && input.pinRelevant) {
+  if (!active && input.pinRelevant && !persistentResolverAvailable) {
     findings.push(createDiagnosticFinding({
       severity: "warning",
       code: "ZIG_SESSION_INACTIVE",
@@ -1120,7 +1123,14 @@ async function inspectDevelopmentFiles(
   const libraryNames: string[] = [];
   try {
     for await (const entry of Deno.readDir(libDir)) {
-      if (entry.isFile) libraryNames.push(entry.name);
+      if (!entry.isFile && !entry.isSymlink) continue;
+      try {
+        const physical = await Deno.realPath(join(libDir, entry.name));
+        const info = await Deno.lstat(physical);
+        if (info.isFile && !info.isSymlink) libraryNames.push(entry.name);
+      } catch {
+        // Broken library aliases do not satisfy the development-file contract.
+      }
     }
   } catch {
     missing.push("LLVM library directory");

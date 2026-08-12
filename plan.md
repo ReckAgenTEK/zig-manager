@@ -1,4 +1,9 @@
-# zig-manager: Directory-Scoped Source-Built Zig Toolchain Plan
+# Historical zig-manager: Directory-Scoped Source-Built Zig Toolchain Plan
+
+> Superseded: this document describes the original Zig-only, session-scoped implementation. The
+> current contract automatically builds paired Zig/ZLS profiles, supports a manager-global default,
+> and installs owned persistent resolvers. Use `README.md`, `docs/cli.md`, and `docs/api.md` as the
+> authoritative behavior and interface documentation.
 
 Status: proposed architecture and implementation plan
 

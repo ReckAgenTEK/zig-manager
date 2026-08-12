@@ -4,12 +4,16 @@ import { ZigInvalidArgumentError, ZigManagerError } from "./errors.ts";
 import { CatalogValidationError } from "./global_catalog.ts";
 import { GlobalConfigValidationError } from "./global_config.ts";
 import { GlobalOperationLockError } from "./global_operation_lock.ts";
+import { GlobalProfileError } from "./global_profile.ts";
 import type {
   BuildOptions,
   DiagnosticFinding,
   ProcessStatus,
+  ScopeOperationOptions,
   ZigGcResult,
   ZigInstallResult,
+  ZigListResult,
+  ZigManagedComponentResult,
   ZigManagerDoctorResult,
   ZigManagerStatus,
   ZigPurgeResult,
@@ -131,35 +135,35 @@ export async function runCliDetailed(
         const values = parseOptions(parsed.args.slice(1), ["--profile", "--jobs"], []);
         const selector = exactlyOne(values.positionals, "install requires one selector");
         const result = await manager.install(selector, buildOptions(values, signal));
-        await output(io, parsed.json, command, result, () => `${result.installationId}\n`);
+        await output(io, parsed.json, command, result, () => installText(result));
         return successExit();
       }
       case "use": {
         const values = parseOptions(
           parsed.args.slice(1),
           ["--installed", "--path", "--profile", "--jobs"],
-          [],
+          ["--global", "-g"],
         );
-        const path = value(values, "--path");
+        const scope = scopeOptions(values, signal);
         const installed = value(values, "--installed");
         let result: ZigUseResult;
         if (installed !== undefined) {
           if (values.positionals.length !== 0 || hasBuildOptions(values)) {
             throw new ZigInvalidArgumentError(
-              "use --installed accepts only an installation ID and optional --path",
+              "use --installed accepts only an installation or profile ID and one scope option",
             );
           }
-          result = await manager.useInstalled(installed, { path, ...signalOptions(signal) });
+          result = await manager.useInstalled(installed, scope);
         } else {
           const selector = exactlyOne(values.positionals, "use requires one selector");
-          result = await manager.use(selector, { ...buildOptions(values, signal), path });
+          result = await manager.use(selector, { ...buildOptions(values, signal), ...scope });
         }
         await output(
           io,
           parsed.json,
           command,
           result,
-          () => `${result.scopeRoot}: ${result.version} (${result.profileId})\n`,
+          () => useText(result),
         );
         if (!parsed.json && result.activationRequired) {
           await io.stderr('Activate this shell with: eval "$(zm shell activate bash)"\n');
@@ -167,49 +171,49 @@ export async function runCliDetailed(
         return successExit();
       }
       case "unuse": {
-        const values = parseOptions(parsed.args.slice(1), ["--path"], []);
+        const values = parseOptions(parsed.args.slice(1), ["--path"], ["--global", "-g"]);
         requireNoPositionals(values, "unuse accepts no positional arguments");
-        const result = await manager.unuse({
-          path: value(values, "--path"),
-          ...signalOptions(signal),
-        });
-        await output(io, parsed.json, command, result, () => `${result.scopeRoot}\n`);
+        const result = await manager.unuse(scopeOptions(values, signal));
+        await output(
+          io,
+          parsed.json,
+          command,
+          result,
+          () => `${result.selection ?? "local"}: ${result.pinPath}\n`,
+        );
         return successExit();
       }
       case "sync": {
         const values = parseOptions(
           parsed.args.slice(1),
           ["--path", "--profile", "--jobs"],
-          [],
+          ["--global", "-g"],
         );
         requireNoPositionals(values, "sync accepts no positional arguments");
         const result = await manager.sync({
           ...buildOptions(values, signal),
-          path: value(values, "--path"),
+          ...scopeOptions(values, signal),
         });
-        await output(io, parsed.json, command, result, () => `${result.executable}\n`);
+        await output(io, parsed.json, command, result, () => syncText(result));
         return successExit();
       }
       case "update": {
         const values = parseOptions(
           parsed.args.slice(1),
           ["--path", "--profile", "--jobs"],
-          [],
+          ["--global", "-g"],
         );
         requireNoPositionals(values, "update advances the selector stored in the current profile");
         const result = await manager.update({
           ...buildOptions(values, signal),
-          path: value(values, "--path"),
+          ...scopeOptions(values, signal),
         });
         await output(
           io,
           parsed.json,
           command,
           result,
-          () =>
-            `${result.scopeRoot}: ${result.version}${
-              result.changed ? " (updated)" : " (unchanged)"
-            }\n`,
+          () => `${result.changed ? "updated" : "unchanged"}\n${useText(result)}`,
         );
         return successExit();
       }
@@ -220,35 +224,31 @@ export async function runCliDetailed(
           remote: values.flags.has("--remote"),
           ...signalOptions(signal),
         });
-        await output(io, parsed.json, command, result, () => {
-          const local = result.installations.map((item) =>
-            `${item.installationId} ${item.version} ${item.commit}`
-          );
-          const remote = result.remote?.map((item) => `remote ${item.text}`) ?? [];
-          return [...local, ...remote].join("\n") + (local.length + remote.length > 0 ? "\n" : "");
-        });
+        await output(io, parsed.json, command, result, () => listText(result));
         return successExit();
       }
       case "current":
       case "status": {
-        const values = parseOptions(parsed.args.slice(1), ["--path"], ["--check"]);
+        const values = parseOptions(
+          parsed.args.slice(1),
+          ["--path"],
+          ["--check", "--global", "-g"],
+        );
         requireNoPositionals(values, `${command} accepts no positional arguments`);
         const result = command === "current"
           ? await manager.current({
-            path: value(values, "--path"),
+            ...scopeOptions(values, signal),
             check: values.flags.has("--check"),
-            ...signalOptions(signal),
           })
           : await manager.status({
-            path: value(values, "--path"),
+            ...scopeOptions(values, signal),
             check: values.flags.has("--check"),
-            ...signalOptions(signal),
           });
         await output(io, parsed.json, command, result, () => currentText(result));
         return successExit();
       }
       case "which": {
-        const values = parseOptions(parsed.args.slice(1), ["--path"], []);
+        const values = parseOptions(parsed.args.slice(1), ["--path"], ["--global", "-g"]);
         if (values.positionals.length > 1) {
           throw new ZigInvalidArgumentError("which accepts at most one tool name");
         }
@@ -256,10 +256,7 @@ export async function runCliDetailed(
         if (tool !== "zig" && tool !== "zls") {
           throw new ZigInvalidArgumentError("which tool must be zig or zls");
         }
-        const result = await manager.which(tool, {
-          path: value(values, "--path"),
-          ...signalOptions(signal),
-        });
+        const result = await manager.which(tool, scopeOptions(values, signal));
         await output(io, parsed.json, command, result, () => `${result}\n`);
         return successExit();
       }
@@ -269,7 +266,7 @@ export async function runCliDetailed(
         const values = parseOptions(
           parsed.args.slice(1),
           ["--path"],
-          ["--host", "--verify", "--strict"],
+          ["--host", "--verify", "--strict", "--global", "-g"],
         );
         if (values.positionals.length > 1) {
           throw new ZigInvalidArgumentError("doctor accepts at most one selector");
@@ -286,12 +283,15 @@ export async function runCliDetailed(
         if (selector !== undefined && verify) {
           throw new ZigInvalidArgumentError("doctor does not accept a selector with --verify");
         }
+        const scope = scopeOptions(values, signal);
+        if ((selector !== undefined || host) && scope.global === true) {
+          throw new ZigInvalidArgumentError("doctor accepts --global only for profile inspection");
+        }
         const result = await manager.doctor(selector, {
-          path: value(values, "--path"),
+          ...scope,
           host,
           verify,
           strict: values.flags.has("--strict"),
-          ...signalOptions(signal),
         });
         await output(
           io,
@@ -393,8 +393,9 @@ async function shellCommand(
     return successExit();
   }
   if (action === "status") {
-    if (args.length !== 1) throw new ZigInvalidArgumentError("shell status accepts no arguments");
-    const result = await manager.shellStatus(signalOptions(signal));
+    const values = parseOptions(args.slice(1), ["--path"], ["--global", "-g"]);
+    requireNoPositionals(values, "shell status accepts no positional arguments");
+    const result = await manager.shellStatus(scopeOptions(values, signal));
     await output(
       io,
       json,
@@ -422,16 +423,22 @@ async function runCommand(
   const separator = args.indexOf("--");
   if (separator < 0) throw new ZigInvalidArgumentError("run requires '--' before Zig arguments");
   const before = args.slice(0, separator);
-  if (before.length > 1 || before[0]?.startsWith("--")) {
+  const values = parseOptions(before, ["--path"], ["--global", "-g"]);
+  if (values.positionals.length > 1) {
+    throw new ZigInvalidArgumentError("run accepts at most one selector or installation ID");
+  }
+  const selector = values.positionals[0];
+  const scope = scopeOptions(values, signal);
+  if (selector !== undefined && (scope.path !== undefined || scope.global === true)) {
     throw new ZigInvalidArgumentError(
-      "run accepts at most one selector or installation ID before '--'",
+      "run cannot combine a selector or installation ID with --path or --global",
     );
   }
   const stdoutDecoder = new TextDecoder();
   const stderrDecoder = new TextDecoder();
   const result = await manager.run(args.slice(separator + 1), {
-    selector: before[0],
-    ...signalOptions(signal),
+    selector,
+    ...scope,
     stdin: "inherit",
     onStdout: (chunk) => io.stdout(stdoutDecoder.decode(chunk, { stream: true })),
     onStderr: (chunk) => io.stderr(stderrDecoder.decode(chunk, { stream: true })),
@@ -492,7 +499,7 @@ function parseOptions(
     } else if (booleanOptions.includes(arg)) {
       if (flags.has(arg)) throw new ZigInvalidArgumentError(`${arg} may be specified only once`);
       flags.add(arg);
-    } else if (arg.startsWith("--")) {
+    } else if (arg.startsWith("-")) {
       throw new ZigInvalidArgumentError(`Unknown option '${arg}'`);
     } else {
       positionals.push(arg);
@@ -529,6 +536,24 @@ function signalOptions(signal: AbortSignal | undefined): { readonly signal?: Abo
   return signal === undefined ? {} : { signal };
 }
 
+function scopeOptions(options: ParsedOptions, signal?: AbortSignal): ScopeOperationOptions {
+  const long = options.flags.has("--global");
+  const short = options.flags.has("-g");
+  if (long && short) {
+    throw new ZigInvalidArgumentError("--global and -g are aliases and may not both be specified");
+  }
+  const path = value(options, "--path");
+  const global = long || short;
+  if (global && path !== undefined) {
+    throw new ZigInvalidArgumentError("--global cannot be combined with --path");
+  }
+  return {
+    ...(path === undefined ? {} : { path }),
+    ...(global ? { global: true } : {}),
+    ...signalOptions(signal),
+  };
+}
+
 function hasBuildOptions(options: ParsedOptions): boolean {
   return options.values.has("--profile") || options.values.has("--jobs");
 }
@@ -557,9 +582,115 @@ async function output(
 }
 
 function currentText(result: ZigManagerStatus): string {
-  return result.mode === "managed"
-    ? `${result.version} ${result.commit}\n${result.executable}\nscope: ${result.scopeRoot}\n`
-    : `fallback${result.executable === null ? " (not found)" : `: ${result.executable}`}\n`;
+  if (result.mode === "fallback") {
+    return [
+      "fallback",
+      toolStatusText("zig", result.zig?.executable ?? result.executable),
+      toolStatusText("zls", result.zls?.executable ?? null),
+    ].join("\n") + "\n";
+  }
+  const lines = [
+    `managed (${result.selection ?? "local"})`,
+    `profile: ${result.profileId}`,
+    managedStatusText(result.zig, "zig", result.version, result.commit, result.executable),
+    managedStatusText(result.zls, "zls", null, null, null),
+    `${result.selection === "global" ? "pointer" : "scope"}: ${
+      result.selection === "global" ? result.pinPath : result.scopeRoot
+    }`,
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function installText(result: ZigInstallResult): string {
+  const lines = [
+    ...(result.profileId === undefined ? [] : [`profile: ${result.profileId}`]),
+    componentText(result.zig ?? zigAlias(result)),
+    componentText(result.zls),
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function useText(result: ZigUseResult): string {
+  const location = result.selection === "global"
+    ? `global: ${result.pinPath}`
+    : `scope: ${result.scopeRoot}`;
+  return `${location}\n${installText(result)}`;
+}
+
+function syncText(result: ZigSyncResult): string {
+  const location = result.selection === "global" ? "global" : `scope: ${result.scopeRoot}`;
+  return `${location}\nprofile: ${result.profileId}\n${
+    componentText(
+      result.zig ?? {
+        component: "zig",
+        selector: "stored",
+        installationId: result.installationId,
+        version: "unknown",
+        commit: "unknown",
+        executable: result.executable,
+        reused: !result.rebuilt,
+      },
+    )
+  }\n${componentText(result.zls)}\n`;
+}
+
+function listText(result: ZigListResult): string {
+  const lines: string[] = [];
+  for (const item of result.installations) {
+    lines.push(
+      `install ${item.component ?? "zig"}: ${item.version} ${item.commit} (${item.installationId})`,
+    );
+  }
+  for (const profile of result.profiles) {
+    lines.push(`profile: ${profile.profileId} (${profile.selector})`);
+    if (profile.zig !== undefined) lines.push(`  ${componentText(profile.zig)}`);
+    if (profile.zls !== undefined) lines.push(`  ${componentText(profile.zls)}`);
+  }
+  for (const remote of result.remote ?? []) lines.push(`remote zig: ${remote.text}`);
+  return lines.join("\n") + (lines.length === 0 ? "" : "\n");
+}
+
+function zigAlias(result: ZigInstallResult): ZigManagedComponentResult {
+  return {
+    component: "zig",
+    selector: result.selector,
+    installationId: result.installationId,
+    version: result.version,
+    commit: result.commit,
+    executable: result.executable,
+    reused: result.reused,
+  };
+}
+
+function componentText(
+  component:
+    | Omit<ZigManagedComponentResult, "reused"> & { readonly reused?: boolean }
+    | null
+    | undefined,
+): string {
+  if (component === null || component === undefined) return "zls: not paired";
+  const reuse = component.reused === undefined ? "" : component.reused ? " reused" : " built";
+  return `${component.component}: ${component.version} ${component.commit} (${component.installationId})${reuse}\n  ${component.executable}`;
+}
+
+function toolStatusText(tool: "zig" | "zls", executable: string | null): string {
+  return `${tool}: ${executable ?? "not found"}`;
+}
+
+function managedStatusText(
+  status: ZigManagerStatus["zig"] | ZigManagerStatus["zls"],
+  tool: "zig" | "zls",
+  version: string | null,
+  commit: string | null,
+  executable: string | null,
+): string {
+  if (status === null) return `${tool}: not paired`;
+  const resolvedVersion = status?.version ?? version;
+  const resolvedCommit = status?.commit ?? commit;
+  const resolvedExecutable = status?.executable ?? executable;
+  return `${tool}: ${resolvedVersion ?? "unknown"} ${resolvedCommit ?? "unknown"}\n  ${
+    resolvedExecutable ?? "not found"
+  }`;
 }
 
 function doctorText(result: ZigManagerDoctorResult): string {
@@ -636,12 +767,26 @@ function repairText(result: ZigRepairResult): string {
     lines.push(`reconciled scope: ${result.registry.reconciled.scopeRoot}`);
   }
   if (result.registry.reason !== null) lines.push(`registry detail: ${result.registry.reason}`);
+  if (result.global !== undefined) {
+    lines.push(
+      `global pointer: ${
+        result.global.valid === null ? "absent" : result.global.valid ? "valid" : "removed invalid"
+      } (${result.global.pointerPath})`,
+    );
+  }
   return `${lines.join("\n")}\n`;
 }
 
 function purgeText(result: ZigPurgeResult): string {
   const verb = result.dryRun ? "would remove" : "removed";
   const lines = result.roots.map((root) => `${verb}: ${root}`);
+  if (result.globalProfileId !== undefined) {
+    lines.push(`global profile: ${result.globalProfileId ?? "none"}`);
+  }
+  if (result.persistentResolvers !== undefined) {
+    if (result.persistentResolvers.zig) lines.push(`${verb}: persistent zig resolver`);
+    if (result.persistentResolvers.zls) lines.push(`${verb}: persistent zls resolver`);
+  }
   for (const pin of result.danglingPins) lines.push(`dangling external pin: ${pin.pinPath}`);
   if (result.registry.reason !== null) lines.push(`registry detail: ${result.registry.reason}`);
   return lines.join("\n") + (lines.length > 0 ? "\n" : "");
@@ -683,6 +828,14 @@ function cliError(cause: unknown): {
       message: cause.message,
       remediation: null,
       details: { lockPath: cause.lockPath, owner: cause.owner },
+    };
+  }
+  if (cause instanceof GlobalProfileError) {
+    return {
+      code: cause.code,
+      message: cause.message,
+      remediation: "Repair or remove the invalid manager-global profile pointer.",
+      details: { pointerPath: cause.pointerPath, reason: cause.reason },
     };
   }
   if (cause !== null && typeof cause === "object") {
@@ -782,27 +935,31 @@ function successExit(): CliExit {
 }
 
 function help(): string {
-  return `zm - directory-scoped source-built Zig toolchains
+  return `zm - source-built paired Zig and ZLS toolchains
 
 Usage:
   zm shell activate bash
   zm shell deactivate bash
-  zm shell status [--json]
+  zm shell status [-g|--global|--path <directory>] [--json]
   zm install <selector> [--profile <profile>] [--jobs <count>] [--json]
-  zm use <selector> [--path <directory>] [build options] [--json]
-  zm use --installed <installation-id> [--path <directory>] [--json]
-  zm unuse [--path <directory>] [--json]
-  zm sync [--path <directory>] [build options] [--json]
-  zm update [--path <directory>] [build options] [--json]
+  zm use <selector> [-g|--global|--path <directory>] [build options] [--json]
+  zm use --installed <installation-or-profile-id> [-g|--global|--path <directory>] [--json]
+  zm unuse [-g|--global|--path <directory>] [--json]
+  zm sync [-g|--global|--path <directory>] [build options] [--json]
+  zm update [-g|--global|--path <directory>] [build options] [--json]
   zm list [--remote] [--json]
-  zm current|status [--path <directory>] [--check] [--json]
-  zm which [zig|zls] [--path <directory>] [--json]
-  zm run [<selector-or-installation-id>] -- <zig arguments>
-  zm doctor [selector] [--path <directory>] [--host] [--verify] [--strict] [--json]
+  zm current|status [-g|--global|--path <directory>] [--check] [--json]
+  zm which [zig|zls] [-g|--global|--path <directory>] [--json]
+  zm run [-g|--global|--path <directory>] -- <zig arguments>
+  zm run <selector-or-installation-id> -- <zig arguments>
+  zm doctor [selector] [-g|--global|--path <directory>] [--host] [--verify] [--strict] [--json]
   zm uninstall <installation-id> [--json]
   zm gc [--dry-run] [--sources] [--build-cache] [--profiles] [--json]
   zm repair [--path <directory>] [--unlock <target>] [--json]
   zm purge (--dry-run|--yes) [--json]
+
+Local directory profiles override the manager-global profile. A use command installs owned
+zig and zls resolvers beside the Deno-installed zm launcher; unrelated executables are never replaced.
 `;
 }
 

@@ -307,8 +307,8 @@ export class ZigScopeNotPinnedError extends ZigManagerError {
     super(
       "ZIG_SCOPE_NOT_PINNED",
       inheritedFrom === null
-        ? `No Zig toolchain pin exists exactly at '${path}'`
-        : `No Zig toolchain pin exists exactly at '${path}'; the effective pin is inherited from '${inheritedFrom}'`,
+        ? `No toolchain profile pointer exists exactly at '${path}'`
+        : `No toolchain profile pointer exists exactly at '${path}'; the effective pointer is inherited from '${inheritedFrom}'`,
       { path, inheritedFrom },
     );
   }
@@ -318,10 +318,10 @@ export class ZigProfileNotFoundError extends ZigManagerError {
   constructor(profileId: string, scopeRoot?: string, options?: ErrorOptions) {
     super(
       "ZIG_PROFILE_NOT_FOUND",
-      `Pinned Zig toolchain profile was not found: ${profileId}`,
+      `Selected Zig/ZLS toolchain profile was not found: ${profileId}`,
       { profileId, ...(scopeRoot === undefined ? {} : { scopeRoot }) },
       options,
-      "Repair or replace the explicit directory profile pin.",
+      "Repair or replace the explicit local or global profile pointer.",
     );
   }
 }
@@ -330,10 +330,10 @@ export class ZigProfileInvalidError extends ZigManagerError {
   constructor(profileId: string, reason: string, options?: ErrorOptions) {
     super(
       "ZIG_PROFILE_INVALID",
-      `Pinned Zig toolchain profile '${profileId}' is invalid: ${reason}`,
+      `Selected Zig/ZLS toolchain profile '${profileId}' is invalid: ${reason}`,
       { profileId, reason },
       options,
-      "Repair or replace the invalid profile and its explicit directory pin.",
+      "Repair or replace the invalid profile and its explicit local or global pointer.",
     );
   }
 }
@@ -394,7 +394,7 @@ export class ZigFallbackNotFoundError extends ZigManagerError {
   constructor(tool: "zig" | "zls") {
     super(
       "ZIG_FALLBACK_NOT_FOUND",
-      `No fallback ${tool} executable exists on the captured base PATH`,
+      `No fallback ${tool} executable exists on the external PATH`,
       { tool },
       undefined,
       `Add the desired external ${tool} to PATH before activating zig-manager.`,
@@ -420,11 +420,18 @@ export class ZigPurgeConfirmationError extends ZigManagerError {
 }
 
 export class ZlsCompatibilityNotFoundError extends ZigManagerError {
-  constructor(profileId: string) {
+  constructor(subject: string, details: Readonly<Record<string, unknown>> = {}) {
+    const compatibilityFailure = typeof details.reason === "string";
     super(
       "ZLS_COMPATIBILITY_NOT_FOUND",
-      `Toolchain profile '${profileId}' has no managed ZLS; ZLS support is deferred`,
-      { profileId },
+      compatibilityFailure
+        ? `No compatible source-built ZLS was found for Zig '${subject}': ${details.reason}`
+        : `Toolchain profile '${subject}' has no managed ZLS provenance`,
+      compatibilityFailure ? { subject, ...details } : { profileId: subject, ...details },
+      undefined,
+      compatibilityFailure
+        ? "Use a Zig release cycle with a strict matching ZLS tag, or a development cycle matching ZLS remote HEAD."
+        : "Select or migrate to a complete schema-v2 paired toolchain profile.",
     );
   }
 }

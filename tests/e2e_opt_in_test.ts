@@ -8,6 +8,8 @@ const INTERACTION_TIMEOUT_MS = 30_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 50;
 const FALLBACK_ZIG_VERSION = "0.0.0-e2e-fallback";
+const FALLBACK_ZLS_VERSION = "0.0.0-e2e-zls-fallback";
+const COMPATIBLE_RELEASE_SELECTOR = "0.16.0";
 const SECOND_BUILD_PROFILE = "minsizerel";
 const RESOLVER_BENCHMARK_RUNS = 20;
 
@@ -323,7 +325,7 @@ const SELECTION_STATE_EXPRESSION = `(() => {
 })()`;
 
 Deno.test({
-  name: "opt-in real Arch latest install and directory-pin workflow",
+  name: "opt-in real Arch paired release and incompatible latest workflow",
   ignore: Deno.env.get("ZIG_MANAGER_E2E") !== "1",
   sanitizeOps: false,
   sanitizeResources: false,
@@ -377,7 +379,8 @@ interface E2eProcessOptions {
   readonly inheritStderr?: boolean;
 }
 
-interface E2eInstallResult {
+interface E2eComponentResult {
+  readonly component: "zig" | "zls";
   readonly installationId: string;
   readonly version: string;
   readonly commit: string;
@@ -385,9 +388,20 @@ interface E2eInstallResult {
   readonly reused: boolean;
 }
 
-interface E2eUseResult extends E2eInstallResult {
+interface E2eInstallResult {
+  readonly installationId: string;
+  readonly version: string;
+  readonly commit: string;
+  readonly executable: string;
+  readonly reused: boolean;
   readonly profileId: string;
-  readonly scopeRoot: string;
+  readonly zig: E2eComponentResult;
+  readonly zls: E2eComponentResult;
+}
+
+interface E2eUseResult extends E2eInstallResult {
+  readonly selection: "local" | "global";
+  readonly scopeRoot: string | null;
   readonly pinPath: string;
 }
 
@@ -401,7 +415,10 @@ async function runArchReleaseGate(sandbox: string, resume: boolean): Promise<voi
   const outsideRoot = join(sandbox, "outside");
   const fallbackBin = join(sandbox, "fallback bin");
   const fallbackZig = join(fallbackBin, "zig");
+  const fallbackZls = join(fallbackBin, "zls");
   const zm = join(installRoot, "bin", "zm");
+  const persistentZig = join(installRoot, "bin", "zig");
+  const persistentZls = join(installRoot, "bin", "zls");
   const shimZig = join(managerHome, "data", "shims", "zig");
   for (const path of [managerHome, projectRoot, childRoot, outsideRoot, fallbackBin]) {
     await Deno.mkdir(path, { recursive: true });
@@ -412,6 +429,12 @@ async function runArchReleaseGate(sandbox: string, resume: boolean): Promise<voi
     { mode: 0o755 },
   );
   await Deno.chmod(fallbackZig, 0o755);
+  await Deno.writeTextFile(
+    fallbackZls,
+    `#!/bin/sh\nif [ "\${1-}" = --version ]; then\n  printf '%s\\n' '${FALLBACK_ZLS_VERSION}'\n  exit 0\nfi\nprintf 'fake fallback zls only supports --version\\n' >&2\nexit 64\n`,
+    { mode: 0o755 },
+  );
+  await Deno.chmod(fallbackZls, 0o755);
 
   const env = isolatedE2eEnvironment(managerHome, installRoot, fallbackBin);
 
@@ -446,7 +469,7 @@ async function runArchReleaseGate(sandbox: string, resume: boolean): Promise<voi
   assertCondition(!launcher.includes("--compile"), "zm launcher unexpectedly uses compilation");
   const help = await runProcess("zm", ["help"], { cwd: projectRoot, env });
   assertProcessSuccess(help, "run the installed zm launcher");
-  assertCondition(help.stdout.includes("directory-scoped"), "installed zm help is unexpected");
+  assertCondition(help.stdout.includes("paired Zig and ZLS"), "installed zm help is unexpected");
 
   // 3. Activation is applied only by evaluating generated Bash output.
   const activation = await runBash(
@@ -467,34 +490,63 @@ printf 'version=%s\n' "$(zig version)"
     "activation changed Zig outside every pin",
   );
 
-  // 4-6. Resolve literal Codeberg HEAD, build it, and pin only the temporary project root.
+  // 4. Literal latest must reject mismatched upstream development cycles before publication.
+  const latestFailure = await runZmFailure(
+    zm,
+    ["use", "latest", "--path", projectRoot, "--json"],
+    { cwd: projectRoot, env, inheritStderr: true },
+  );
+  assertCondition(
+    latestFailure.code === "ZLS_COMPATIBILITY_NOT_FOUND",
+    `incompatible latest returned unexpected error ${String(latestFailure.code)}`,
+  );
+  const latestDetails = requiredObject(latestFailure.details, "latest compatibility details");
+  assertCondition(
+    latestDetails.zigSelector === "latest" &&
+      typeof latestDetails.zigVersion === "string" &&
+      typeof latestDetails.zlsVersion === "string",
+    "latest compatibility failure omitted exact Zig/ZLS provenance",
+  );
+  assertCondition(
+    !await pathExists(join(projectRoot, ".zig-manager", "toolchain")),
+    "incompatible latest published a project pin",
+  );
+
+  // 5-7. Build a compatible stable pair and pin only the temporary project root.
   const initialStarted = performance.now();
   const initial = parseUseResult(
-    await runZmSuccess(zm, ["use", "latest", "--path", projectRoot, "--json"], {
-      cwd: projectRoot,
-      env,
-      inheritStderr: true,
-    }),
+    await runZmSuccess(
+      zm,
+      ["use", COMPATIBLE_RELEASE_SELECTOR, "--path", projectRoot, "--json"],
+      {
+        cwd: projectRoot,
+        env,
+        inheritStderr: true,
+      },
+    ),
   );
   const initialBuildMs = performance.now() - initialStarted;
   if (!resume) {
     assertCondition(
       !initial.reused,
-      "isolated latest unexpectedly reused an existing installation",
+      "isolated compatible release unexpectedly reused an existing installation",
     );
   }
-  assertCondition(/^[0-9a-f]{40}$/.test(initial.commit), "latest did not resolve an exact commit");
-  assertCondition(await isExecutableFile(initial.executable), "latest executable is not runnable");
+  assertCondition(/^[0-9a-f]{40}$/.test(initial.commit), "release did not resolve an exact commit");
+  assertCondition(await isExecutableFile(initial.executable), "release executable is not runnable");
+  assertCondition(await isExecutableFile(initial.zls.executable), "release ZLS is not runnable");
+  assertCondition(await isExecutableFile(persistentZig), "persistent Zig resolver is absent");
+  assertCondition(await isExecutableFile(persistentZls), "persistent ZLS resolver is absent");
   const initialAdapter = await installAdapterId(managerHome, initial.installationId);
   assertCondition(
-    initialAdapter === "zig-cmake-llvm22-autodoc-v1",
-    `latest selected unexpected adapter ${initialAdapter}`,
+    initialAdapter === "zig-cmake-llvm21-autodoc-v1",
+    `compatible release selected unexpected adapter ${initialAdapter}`,
   );
   await logE2e(
-    `latest commit=${initial.commit} adapter=${initialAdapter} installation=${initial.installationId}\n`,
+    `release commit=${initial.commit} adapter=${initialAdapter} installation=${initial.installationId}\n`,
   );
 
-  // 6-9. One activated shell switches by directory; unactivated and future shells stay coherent.
+  // 6-9. Activated and ordinary shells switch by directory through the persistent pair resolvers.
   const activated = await activatedDirectoryProbe(zm, env, projectRoot, childRoot, outsideRoot);
   assertCondition(activated.root === initial.version, "managed Zig is not active at the pin root");
   assertCondition(
@@ -527,11 +579,56 @@ printf 'version=%s\n' "$(zig version)"
   );
   assertProcessSuccess(unactivated, "probe an unactivated shell inside the pin");
   const unactivatedValues = parseKeyValues(unactivated.stdout);
-  assertCondition(unactivatedValues.path === fallbackZig, "unactivated shell changed Zig PATH");
   assertCondition(
-    unactivatedValues.version === FALLBACK_ZIG_VERSION,
-    "unactivated shell used managed Zig",
+    unactivatedValues.path === persistentZig,
+    "persistent Zig resolver is not on PATH",
   );
+  assertCondition(
+    unactivatedValues.version === initial.version,
+    "unactivated shell did not use managed Zig",
+  );
+
+  const global = parseUseResult(
+    await runZmSuccess(zm, ["use", "--installed", initial.profileId, "--global", "--json"], {
+      cwd: outsideRoot,
+      env,
+    }),
+  );
+  assertCondition(
+    global.selection === "global" && global.scopeRoot === null,
+    "global use was local",
+  );
+  const freshGlobal = await runBash(
+    `set -euo pipefail
+cd "$OUTSIDE"
+printf 'zig_path=%s\n' "$(command -v zig)"
+printf 'zig=%s\n' "$(zig version)"
+printf 'zls_path=%s\n' "$(command -v zls)"
+printf 'zls=%s\n' "$(zls --version)"
+`,
+    outsideRoot,
+    { ...env, OUTSIDE: outsideRoot },
+  );
+  assertProcessSuccess(freshGlobal, "probe global pair in an ordinary shell");
+  const globalValues = parseKeyValues(freshGlobal.stdout);
+  assertCondition(globalValues.zig_path === persistentZig, "global Zig did not use its resolver");
+  assertCondition(globalValues.zig === initial.version, "global Zig version is wrong");
+  assertCondition(globalValues.zls_path === persistentZls, "global ZLS did not use its resolver");
+  assertCondition(globalValues.zls === initial.zls.version, "global ZLS version is wrong");
+  await runZmSuccess(zm, ["unuse", "--global", "--json"], { cwd: outsideRoot, env });
+  const restoredFallback = await runBash(
+    `set -euo pipefail
+cd "$OUTSIDE"
+printf 'zig=%s\n' "$(zig version)"
+printf 'zls=%s\n' "$(zls --version)"
+`,
+    outsideRoot,
+    { ...env, OUTSIDE: outsideRoot },
+  );
+  assertProcessSuccess(restoredFallback, "restore external Zig and ZLS after global unuse");
+  const restoredValues = parseKeyValues(restoredFallback.stdout);
+  assertCondition(restoredValues.zig === FALLBACK_ZIG_VERSION, "external Zig was not restored");
+  assertCondition(restoredValues.zls === FALLBACK_ZLS_VERSION, "external ZLS was not restored");
   const future = await activatedDirectoryProbe(zm, env, projectRoot, childRoot, outsideRoot);
   assertCondition(
     future.root === initial.version,
@@ -571,24 +668,28 @@ printf 'compiled=ok\n'
   const resolverAverageMs = await benchmarkVersion(shimZig, projectRoot, resolverEnv);
   const directAverageMs = await benchmarkVersion(initial.executable, projectRoot, env);
 
-  // 11. A second literal latest observation must resolve to the same recipe and skip the build.
+  // 11. A second exact release observation must resolve to the same recipe and skip the build.
   const reuseStarted = performance.now();
   const reused = parseUseResult(
-    await runZmSuccess(zm, ["use", "latest", "--path", projectRoot, "--json"], {
-      cwd: projectRoot,
-      env,
-      inheritStderr: true,
-    }),
+    await runZmSuccess(
+      zm,
+      ["use", COMPATIBLE_RELEASE_SELECTOR, "--path", projectRoot, "--json"],
+      {
+        cwd: projectRoot,
+        env,
+        inheritStderr: true,
+      },
+    ),
   );
   const reuseMs = performance.now() - reuseStarted;
-  assertCondition(reused.reused, "unchanged latest did not reuse its exact recipe");
+  assertCondition(reused.reused, "unchanged release did not reuse its exact recipe");
   assertCondition(
     reused.commit === initial.commit,
-    "Codeberg HEAD advanced during the release gate",
+    "exact release resolved a different commit",
   );
   assertCondition(
     reused.installationId === initial.installationId && reused.profileId === initial.profileId,
-    "unchanged latest produced a different install or profile",
+    "unchanged release produced a different install or profile",
   );
 
   // 12. Build a second exact Zig once, then publish it to a nested scope without rebuilding.
@@ -668,7 +769,7 @@ printf 'compiled=ok\n'
   }
   const failed = await runZmFailure(
     zm,
-    ["use", "latest", "--path", projectRoot, "--json"],
+    ["use", COMPATIBLE_RELEASE_SELECTOR, "--path", projectRoot, "--json"],
     {
       cwd: projectRoot,
       env: {
@@ -749,11 +850,17 @@ printf 'compiled=ok\n'
     JSON.stringify({
       initial: {
         resumed: resume,
+        selector: COMPATIBLE_RELEASE_SELECTOR,
         commit: initial.commit,
         adapter: initialAdapter,
         installationId: initial.installationId,
         buildMs: Math.round(initialBuildMs),
         reuseMs: Math.round(reuseMs),
+      },
+      latestFailure: {
+        code: latestFailure.code,
+        zigVersion: latestDetails.zigVersion,
+        zlsVersion: latestDetails.zlsVersion,
       },
       second: {
         selector: secondSelector,
@@ -789,7 +896,7 @@ function isolatedE2eEnvironment(
   env.DENO_INSTALL_ROOT = installRoot;
   env.DENO_NO_UPDATE_CHECK = "1";
   env.NO_COLOR = "1";
-  env.PATH = `${fallbackBin}:${join(installRoot, "bin")}:${originalPath}`;
+  env.PATH = `${join(installRoot, "bin")}:${fallbackBin}:${originalPath}`;
   return env;
 }
 
@@ -860,21 +967,55 @@ function parseInstallResult(value: JsonObject): E2eInstallResult {
   assertCondition(/^[0-9a-f]{64}$/.test(installationId), "installationId is not SHA-256");
   const commit = requiredString(value.commit, "commit");
   assertCondition(/^[0-9a-f]{40}$/.test(commit), "commit is not a canonical object ID");
-  return {
+  const zig = parseComponentResult(requiredObject(value.zig, "zig"), "zig");
+  const zls = parseComponentResult(requiredObject(value.zls, "zls"), "zls");
+  const result = {
     installationId,
     version: requiredString(value.version, "version"),
     commit,
     executable: requiredString(value.executable, "executable"),
     reused: requiredBoolean(value.reused, "reused"),
+    profileId: requiredString(value.profileId, "profileId"),
+    zig,
+    zls,
   };
+  assertCondition(result.installationId === zig.installationId, "top-level Zig ID alias changed");
+  assertCondition(result.version === zig.version, "top-level Zig version alias changed");
+  assertCondition(result.commit === zig.commit, "top-level Zig commit alias changed");
+  assertCondition(result.executable === zig.executable, "top-level Zig executable alias changed");
+  return result;
 }
 
 function parseUseResult(value: JsonObject): E2eUseResult {
+  const scopeRoot = value.scopeRoot;
+  assertCondition(scopeRoot === null || typeof scopeRoot === "string", "scopeRoot is invalid");
+  const selection = requiredString(value.selection, "selection");
+  assertCondition(selection === "local" || selection === "global", "selection is invalid");
   return {
     ...parseInstallResult(value),
-    profileId: requiredString(value.profileId, "profileId"),
-    scopeRoot: requiredString(value.scopeRoot, "scopeRoot"),
+    selection,
+    scopeRoot,
     pinPath: requiredString(value.pinPath, "pinPath"),
+  };
+}
+
+function parseComponentResult(
+  value: JsonObject,
+  expected: "zig" | "zls",
+): E2eComponentResult {
+  const component = requiredString(value.component, `${expected}.component`);
+  assertCondition(component === expected, `${expected}.component is wrong`);
+  const installationId = requiredString(value.installationId, `${expected}.installationId`);
+  assertCondition(/^[0-9a-f]{64}$/.test(installationId), `${expected} ID is not SHA-256`);
+  const commit = requiredString(value.commit, `${expected}.commit`);
+  assertCondition(/^[0-9a-f]{40}$/.test(commit), `${expected} commit is not canonical`);
+  return {
+    component,
+    installationId,
+    version: requiredString(value.version, `${expected}.version`),
+    commit,
+    executable: requiredString(value.executable, `${expected}.executable`),
+    reused: requiredBoolean(value.reused, `${expected}.reused`),
   };
 }
 
@@ -961,6 +1102,16 @@ function requiredBoolean(value: unknown, label: string): boolean {
 async function isExecutableFile(path: string): Promise<boolean> {
   const info = await Deno.stat(path).catch(() => null);
   return info?.isFile === true && (info.mode === null || (info.mode & 0o111) !== 0);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await Deno.lstat(path);
+    return true;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
 }
 
 async function runVersionOnce(

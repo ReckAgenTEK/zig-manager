@@ -6,18 +6,22 @@ import {
   type InstalledObject,
   type InstallManifestV3,
   InstallStore,
+  type ResolvedSource,
   validateInstallationId,
   validateInstallComponent,
   validateInstallManifest,
+  validateResolvedSource,
   validateTimestamp,
 } from "./install_store.ts";
 import {
+  isPairedToolchainProfile,
   type StoredToolchainProfile,
+  type ToolchainProfile,
   ToolchainProfileStore,
-  type ToolchainProfileV1,
   validateProfileId,
   validateToolchainProfile,
 } from "./profile_store.ts";
+import { type ResolvedZlsSource, validateResolvedZlsSource } from "./zls_source_workspace.ts";
 
 export const CATALOG_SCHEMA_VERSION = 3 as const;
 
@@ -34,10 +38,13 @@ export interface CatalogInstallationV3 {
 
 export interface CatalogProfileV3 {
   readonly profileId: string;
+  readonly profileSchemaVersion: 1 | 2;
   readonly requestedSelector: string;
   readonly resolvedCommit: string;
   readonly zigInstallationId: string;
   readonly zlsInstallationId: string | null;
+  readonly source: ResolvedSource;
+  readonly zlsSource: ResolvedZlsSource | null;
   readonly createdAt: string;
 }
 
@@ -201,7 +208,7 @@ export class GlobalCatalog {
   }
 
   async updateProfile(
-    profile: ToolchainProfileV1,
+    profile: ToolchainProfile,
     options: CatalogMutationOptions = {},
   ): Promise<CatalogV3> {
     validateToolchainProfile(profile);
@@ -233,14 +240,17 @@ function installationEntry(manifestValue: InstallManifestV3): CatalogInstallatio
   };
 }
 
-function profileEntry(profileValue: ToolchainProfileV1): CatalogProfileV3 {
+function profileEntry(profileValue: ToolchainProfile): CatalogProfileV3 {
   const profile = validateToolchainProfile(profileValue);
   return {
     profileId: profile.profileId,
+    profileSchemaVersion: profile.schemaVersion,
     requestedSelector: profile.source.requestedSelector,
     resolvedCommit: profile.source.commit,
     zigInstallationId: profile.components.zig,
     zlsInstallationId: profile.components.zls,
+    source: profile.source,
+    zlsSource: isPairedToolchainProfile(profile) ? profile.zlsSource : null,
     createdAt: profile.createdAt,
   };
 }
@@ -293,27 +303,56 @@ function catalogInstallation(value: unknown, path: string): CatalogInstallationV
 function catalogProfile(value: unknown, path: string): CatalogProfileV3 {
   const root = strictObject(value, path, [
     "profileId",
+    "profileSchemaVersion",
     "requestedSelector",
     "resolvedCommit",
     "zigInstallationId",
     "zlsInstallationId",
+    "source",
+    "zlsSource",
     "createdAt",
   ]);
+  const profileSchemaVersion = root.profileSchemaVersion;
+  if (profileSchemaVersion !== 1 && profileSchemaVersion !== 2) {
+    throw new TypeError(`${path}.profileSchemaVersion must equal 1 or 2`);
+  }
   const commit = text(root.resolvedCommit, `${path}.resolvedCommit`);
   if (!COMMIT.test(commit)) {
     throw new TypeError(`${path}.resolvedCommit must be a lowercase object ID`);
   }
+  const requestedSelector = text(root.requestedSelector, `${path}.requestedSelector`);
+  const source = validateResolvedSource(root.source, `${path}.source`);
+  if (source.component !== "zig") throw new TypeError(`${path}.source.component must be 'zig'`);
+  if (source.requestedSelector !== requestedSelector) {
+    throw new TypeError(`${path}.requestedSelector must match ${path}.source`);
+  }
+  if (source.commit !== commit) {
+    throw new TypeError(`${path}.resolvedCommit must match ${path}.source`);
+  }
+  const zlsInstallationId = root.zlsInstallationId === null
+    ? null
+    : validateInstallationId(root.zlsInstallationId, `${path}.zlsInstallationId`);
+  const zlsSource = root.zlsSource === null
+    ? null
+    : validateResolvedZlsSource(root.zlsSource, `${path}.zlsSource`);
+  if (profileSchemaVersion === 1 && zlsSource !== null) {
+    throw new TypeError(`${path}.zlsSource must be null for a schema-v1 profile`);
+  }
+  if (profileSchemaVersion === 2 && (zlsInstallationId === null || zlsSource === null)) {
+    throw new TypeError(`${path} schema-v2 profile requires ZLS installation ID and source`);
+  }
   return {
     profileId: validateProfileId(root.profileId, `${path}.profileId`),
-    requestedSelector: text(root.requestedSelector, `${path}.requestedSelector`),
+    profileSchemaVersion,
+    requestedSelector,
     resolvedCommit: commit,
     zigInstallationId: validateInstallationId(
       root.zigInstallationId,
       `${path}.zigInstallationId`,
     ),
-    zlsInstallationId: root.zlsInstallationId === null
-      ? null
-      : validateInstallationId(root.zlsInstallationId, `${path}.zlsInstallationId`),
+    zlsInstallationId,
+    source,
+    zlsSource,
     createdAt: validateTimestamp(root.createdAt, `${path}.createdAt`),
   };
 }

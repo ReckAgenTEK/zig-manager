@@ -274,8 +274,13 @@ async function fingerprintDevelopmentFiles(
       requirement.namePattern.lastIndex = 0;
       if (!requirement.namePattern.test(entry.name)) continue;
       const candidate = join(libDir, entry.name);
-      const info = await Deno.lstat(candidate);
-      if (info.isFile && !info.isSymlink) matches.push(candidate);
+      try {
+        const physical = resolve(await Deno.realPath(candidate));
+        const info = await Deno.lstat(physical);
+        if (info.isFile && !info.isSymlink && info.size > 0) matches.push(physical);
+      } catch (cause) {
+        if (cause instanceof ZigOperationAbortedError) throw cause;
+      }
     }
     if (matches.length === 0) {
       throw new TypeError(`no physical development file matched ${requirement.component}`);

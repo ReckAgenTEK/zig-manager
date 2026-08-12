@@ -103,20 +103,250 @@
         }
       }
     },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "url"
+      ],
+      "properties": {
+        "identity": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]{0,127}$"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        }
+      }
+    },
+    "resolvedRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "value"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "head",
+            "tag",
+            "branch",
+            "commit"
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "sourceVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "base",
+        "text",
+        "taggedAncestor",
+        "commitsAfterTag",
+        "commitAbbreviation"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "release",
+            "development"
+          ]
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "text": {
+          "$ref": "#/$defs/text"
+        },
+        "taggedAncestor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "commitsAfterTag": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "commitAbbreviation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4,64}$"
+        }
+      }
+    },
+    "zlsSourceVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "declaredVersion",
+        "base",
+        "text",
+        "versionString",
+        "taggedAncestor",
+        "commitsAfterTag",
+        "commitAbbreviation"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "release",
+            "development"
+          ]
+        },
+        "declaredVersion": {
+          "$ref": "#/$defs/text"
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "text": {
+          "$ref": "#/$defs/text"
+        },
+        "versionString": {
+          "$ref": "#/$defs/text"
+        },
+        "taggedAncestor": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "commitsAfterTag": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "commitAbbreviation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4,64}$"
+        }
+      }
+    },
+    "resolvedZigSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "repository",
+        "requestedSelector",
+        "resolvedRef",
+        "commit",
+        "version",
+        "versionMetadata",
+        "resolvedAt"
+      ],
+      "properties": {
+        "component": {
+          "const": "zig"
+        },
+        "repository": {
+          "$ref": "#/$defs/repository"
+        },
+        "requestedSelector": {
+          "$ref": "#/$defs/text"
+        },
+        "resolvedRef": {
+          "$ref": "#/$defs/resolvedRef"
+        },
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "version": {
+          "$ref": "#/$defs/text"
+        },
+        "versionMetadata": {
+          "$ref": "#/$defs/sourceVersion"
+        },
+        "resolvedAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "resolvedZlsSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "repository",
+        "requestedSelector",
+        "resolvedRef",
+        "commit",
+        "version",
+        "versionMetadata",
+        "resolvedAt"
+      ],
+      "properties": {
+        "component": {
+          "const": "zls"
+        },
+        "repository": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "identity",
+            "url"
+          ],
+          "properties": {
+            "identity": {
+              "const": "github/zls"
+            },
+            "url": {
+              "const": "https://github.com/zigtools/zls.git"
+            }
+          }
+        },
+        "requestedSelector": {
+          "$ref": "#/$defs/text"
+        },
+        "resolvedRef": {
+          "$ref": "#/$defs/resolvedRef"
+        },
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "version": {
+          "$ref": "#/$defs/text"
+        },
+        "versionMetadata": {
+          "$ref": "#/$defs/zlsSourceVersion"
+        },
+        "resolvedAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
     "profile": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "profileId",
+        "profileSchemaVersion",
         "requestedSelector",
         "resolvedCommit",
         "zigInstallationId",
         "zlsInstallationId",
+        "source",
+        "zlsSource",
         "createdAt"
       ],
       "properties": {
         "profileId": {
           "$ref": "#/$defs/hash"
+        },
+        "profileSchemaVersion": {
+          "enum": [
+            1,
+            2
+          ]
         },
         "requestedSelector": {
           "$ref": "#/$defs/text"
@@ -137,10 +367,54 @@
             }
           ]
         },
+        "source": {
+          "$ref": "#/$defs/resolvedZigSource"
+        },
+        "zlsSource": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/resolvedZlsSource"
+            }
+          ]
+        },
         "createdAt": {
           "$ref": "#/$defs/timestamp"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "profileSchemaVersion": {
+                "const": 1
+              }
+            },
+            "required": [
+              "profileSchemaVersion"
+            ]
+          },
+          "then": {
+            "properties": {
+              "zlsSource": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "zlsInstallationId": {
+                "$ref": "#/$defs/hash"
+              },
+              "zlsSource": {
+                "$ref": "#/$defs/resolvedZlsSource"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

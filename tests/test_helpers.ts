@@ -1,6 +1,16 @@
 import { LockedRequestMismatchError, RepositoryNotFoundError } from "@zignado/source-ref";
 import { dirname, join } from "@std/path";
 import { ZigOperationAbortedError } from "../src/errors.ts";
+import { ZLS_INSTALL_VERIFIER_CONTRACT_VERSION } from "../src/build_recipe.ts";
+import type {
+  ZlsLspProtocolVerification,
+  ZlsLspProtocolVerifier,
+  ZlsLspProtocolVerifierInput,
+} from "../src/zls_install_pipeline.ts";
+import {
+  ZLS_SOURCE_REPOSITORY_IDENTITY,
+  ZLS_SOURCE_REPOSITORY_URL,
+} from "../src/zls_source_workspace.ts";
 import type {
   CheckoutResult,
   ProcessRequest,
@@ -19,6 +29,9 @@ import type {
 export const COMMIT_A = "a".repeat(40);
 export const COMMIT_B = "b".repeat(40);
 export const COMMIT_C = "c".repeat(40);
+export const COMMIT_D = "d".repeat(40);
+export const COMMIT_E = "e".repeat(40);
+export const COMMIT_F = "f".repeat(40);
 
 export function testConfig(root: string, prefix = join(root, "toolchain")): ZigManagerConfig {
   return {
@@ -125,34 +138,103 @@ export class FakeSourceRef implements SourceRefApi {
   readonly repositoryHome: string;
   readonly checkoutPath: string;
   readonly calls: string[] = [];
+  readonly zlsCalls: string[] = [];
   refs: RemoteRef[] = [
     { kind: "tag", name: "0.16.0", commit: COMMIT_A },
     { kind: "tag", name: "0.15.2", commit: COMMIT_C },
     { kind: "branch", name: "master", commit: COMMIT_B },
   ];
   failRemote = false;
+  failZlsRemote = false;
   head: RemoteHead = { branch: "master", commit: COMMIT_B };
   dirty = false;
   locked: { ref: CheckoutResult["requested"]; commit: string } | null = null;
+  zlsRefs: RemoteRef[] = [
+    { kind: "tag", name: "0.16.0", commit: COMMIT_D },
+    { kind: "tag", name: "0.16.2", commit: COMMIT_E },
+    { kind: "tag", name: "0.15.3", commit: COMMIT_C },
+    { kind: "branch", name: "master", commit: COMMIT_E },
+  ];
+  zlsHead: RemoteHead = { branch: "master", commit: COMMIT_E };
+  zlsLocked: { ref: CheckoutResult["requested"]; commit: string } | null = null;
   readonly versions = new Map<string, { base: string; tag: string; distance: number }>([
     [COMMIT_A, { base: "0.16.0", tag: "0.16.0", distance: 0 }],
     [COMMIT_B, { base: "0.16.1", tag: "0.16.1", distance: 0 }],
     [COMMIT_C, { base: "0.15.2", tag: "0.15.2", distance: 0 }],
   ]);
+  readonly zlsVersions = new Map<
+    string,
+    {
+      declaredVersion: string;
+      minimumBuildVersion: string;
+      maximumBuildVersionExclusive: string | null;
+      tag: string;
+      distance: number;
+    }
+  >([
+    [COMMIT_C, {
+      declaredVersion: "0.15.3",
+      minimumBuildVersion: "0.15.2",
+      maximumBuildVersionExclusive: null,
+      tag: "0.15.3",
+      distance: 0,
+    }],
+    [COMMIT_D, {
+      declaredVersion: "0.16.0",
+      minimumBuildVersion: "0.16.0",
+      maximumBuildVersionExclusive: null,
+      tag: "0.16.0",
+      distance: 0,
+    }],
+    [COMMIT_E, {
+      declaredVersion: "0.16.2",
+      minimumBuildVersion: "0.16.0",
+      maximumBuildVersionExclusive: null,
+      tag: "0.16.2",
+      distance: 0,
+    }],
+    [COMMIT_F, {
+      declaredVersion: "0.17.0-dev",
+      minimumBuildVersion: "0.17.0-dev.1+aaaaaaaaa",
+      maximumBuildVersionExclusive: null,
+      tag: "0.16.2",
+      distance: 8,
+    }],
+  ]);
+  readonly zlsRepositoryHome: string;
+  readonly zlsCheckoutPath: string;
 
   constructor(projectRoot: string, sourceRoot = join(projectRoot, ".source-ref")) {
     this.root = sourceRoot;
     this.repositoryHome = join(this.root, "codeberg", "zig");
     this.checkoutPath = join(this.repositoryHome, "git-src");
+    this.zlsRepositoryHome = join(this.root, "github", "zls");
+    this.zlsCheckoutPath = join(this.zlsRepositoryHome, "git-src");
   }
 
-  resolveRemoteHead(): Promise<RemoteHead> {
+  resolveRemoteHead(
+    request: Parameters<SourceRefApi["resolveRemoteHead"]>[0],
+  ): Promise<RemoteHead> {
+    if (request.url === ZLS_SOURCE_REPOSITORY_URL) {
+      this.zlsCalls.push("resolveRemoteHead");
+      if (this.failZlsRemote) return Promise.reject(new Error("ZLS remote unavailable"));
+      return Promise.resolve({ ...this.zlsHead });
+    }
     this.calls.push("resolveRemoteHead");
     if (this.failRemote) return Promise.reject(new Error("remote unavailable"));
     return Promise.resolve({ ...this.head });
   }
 
-  listRemoteRefs(request: { readonly kind?: "tag" | "branch" }): Promise<RemoteRef[]> {
+  listRemoteRefs(
+    request: { readonly url: string; readonly kind?: "tag" | "branch" },
+  ): Promise<RemoteRef[]> {
+    if (request.url === ZLS_SOURCE_REPOSITORY_URL) {
+      this.zlsCalls.push("listRemoteRefs");
+      if (this.failZlsRemote) return Promise.reject(new Error("ZLS remote unavailable"));
+      return Promise.resolve(
+        this.zlsRefs.filter((ref) => request.kind === undefined || ref.kind === request.kind),
+      );
+    }
     this.calls.push("listRemoteRefs");
     if (this.failRemote) return Promise.reject(new Error("remote unavailable"));
     return Promise.resolve(
@@ -160,16 +242,32 @@ export class FakeSourceRef implements SourceRefApi {
     );
   }
 
-  describeRevision(): Promise<RevisionDescription> {
-    this.calls.push("describeRevision");
-    if (!this.locked) return Promise.reject(new RepositoryNotFoundError("codeberg/zig"));
-    const metadata = this.versions.get(this.locked.commit);
-    if (!metadata) throw new Error(`missing fake version metadata for ${this.locked.commit}`);
+  describeRevision(selector: unknown): Promise<RevisionDescription> {
+    const zls = isZlsRepository(selector);
+    (zls ? this.zlsCalls : this.calls).push("describeRevision");
+    const locked = zls ? this.zlsLocked : this.locked;
+    if (!locked) {
+      return Promise.reject(
+        new RepositoryNotFoundError(zls ? ZLS_SOURCE_REPOSITORY_IDENTITY : "codeberg/zig"),
+      );
+    }
+    if (zls) {
+      const metadata = this.zlsVersions.get(locked.commit);
+      if (!metadata) throw new Error(`missing fake ZLS version metadata for ${locked.commit}`);
+      return Promise.resolve({
+        commit: locked.commit,
+        tag: metadata.tag,
+        commitsSinceTag: metadata.distance,
+        abbreviatedCommit: locked.commit.slice(0, 9),
+      });
+    }
+    const metadata = this.versions.get(locked.commit);
+    if (!metadata) throw new Error(`missing fake version metadata for ${locked.commit}`);
     return Promise.resolve({
-      commit: this.locked.commit,
+      commit: locked.commit,
       tag: metadata.tag,
       commitsSinceTag: metadata.distance,
-      abbreviatedCommit: this.locked.commit.slice(0, 9),
+      abbreviatedCommit: locked.commit.slice(0, 9),
     });
   }
 
@@ -179,14 +277,18 @@ export class FakeSourceRef implements SourceRefApi {
     readonly mode: "pinned" | "branch";
     readonly ref: CheckoutResult["requested"];
   }): Promise<CheckoutResult> {
-    this.calls.push("ensure");
-    if (this.locked && !sameRef(this.locked.ref, request.ref)) {
-      throw new LockedRequestMismatchError("codeberg/zig");
+    const zls = request.id.provider === "github" && request.id.name === "zls";
+    (zls ? this.zlsCalls : this.calls).push("ensure");
+    const locked = zls ? this.zlsLocked : this.locked;
+    if (locked && !sameRef(locked.ref, request.ref)) {
+      throw new LockedRequestMismatchError(zls ? ZLS_SOURCE_REPOSITORY_IDENTITY : "codeberg/zig");
     }
-    const commit = this.locked?.commit ?? this.resolveRef(request.ref);
-    this.locked ??= { ref: { ...request.ref }, commit };
-    await this.writeSource(commit);
-    return this.result(request.ref, commit, this.locked === null);
+    const cloned = locked === null;
+    const commit = locked?.commit ?? this.resolveRef(request.ref, zls);
+    if (zls) this.zlsLocked ??= { ref: { ...request.ref }, commit };
+    else this.locked ??= { ref: { ...request.ref }, commit };
+    await this.writeSource(commit, zls);
+    return this.result(request.ref, commit, cloned, zls);
   }
 
   async sync(): Promise<CheckoutResult[]> {
@@ -197,16 +299,21 @@ export class FakeSourceRef implements SourceRefApi {
   }
 
   async update(
-    _selector: unknown,
+    selector: unknown,
     options: { readonly ref?: CheckoutResult["requested"] } = {},
   ): Promise<CheckoutResult> {
-    this.calls.push("update");
-    if (!this.locked) throw new RepositoryNotFoundError("codeberg/zig");
-    const ref = options.ref ?? this.locked.ref;
-    const commit = this.resolveRef(ref);
-    this.locked = { ref: { ...ref }, commit };
-    await this.writeSource(commit);
-    return this.result(ref, commit, false);
+    const zls = isZlsRepository(selector);
+    (zls ? this.zlsCalls : this.calls).push("update");
+    const locked = zls ? this.zlsLocked : this.locked;
+    if (!locked) {
+      throw new RepositoryNotFoundError(zls ? ZLS_SOURCE_REPOSITORY_IDENTITY : "codeberg/zig");
+    }
+    const ref = options.ref ?? locked.ref;
+    const commit = this.resolveRef(ref, zls);
+    if (zls) this.zlsLocked = { ref: { ...ref }, commit };
+    else this.locked = { ref: { ...ref }, commit };
+    await this.writeSource(commit, zls);
+    return this.result(ref, commit, false, zls);
   }
 
   doctor(): Promise<SourceRefDoctorResult> {
@@ -227,19 +334,25 @@ export class FakeSourceRef implements SourceRefApi {
     });
   }
 
-  status(): Promise<RepositoryStatus[]> {
-    this.calls.push("status");
-    if (!this.locked) return Promise.reject(new RepositoryNotFoundError("codeberg/zig"));
+  status(selector?: unknown): Promise<RepositoryStatus[]> {
+    const zls = isZlsRepository(selector);
+    (zls ? this.zlsCalls : this.calls).push("status");
+    const locked = zls ? this.zlsLocked : this.locked;
+    if (!locked) {
+      return Promise.reject(
+        new RepositoryNotFoundError(zls ? ZLS_SOURCE_REPOSITORY_IDENTITY : "codeberg/zig"),
+      );
+    }
     return Promise.resolve([{
-      id: { provider: "codeberg", name: "zig" },
-      repositoryHome: this.repositoryHome,
-      checkoutPath: this.checkoutPath,
-      url: "https://codeberg.org/ziglang/zig.git",
+      id: zls ? { provider: "github", name: "zls" } : { provider: "codeberg", name: "zig" },
+      repositoryHome: zls ? this.zlsRepositoryHome : this.repositoryHome,
+      checkoutPath: zls ? this.zlsCheckoutPath : this.checkoutPath,
+      url: zls ? ZLS_SOURCE_REPOSITORY_URL : "https://codeberg.org/ziglang/zig.git",
       mode: "pinned",
-      requested: { ...this.locked.ref },
-      lockedCommit: this.locked.commit,
+      requested: { ...locked.ref },
+      lockedCommit: locked.commit,
       checkoutExists: true,
-      currentCommit: this.locked.commit,
+      currentCommit: locked.commit,
       currentBranch: null,
       dirty: this.dirty,
       changes: this.dirty ? [" M fixture.zig"] : [],
@@ -248,19 +361,49 @@ export class FakeSourceRef implements SourceRefApi {
     }]);
   }
 
-  path(_selector: unknown, options: { readonly repositoryRoot?: boolean } = {}): string {
-    this.calls.push("path");
+  path(selector: unknown, options: { readonly repositoryRoot?: boolean } = {}): string {
+    const zls = isZlsRepository(selector);
+    (zls ? this.zlsCalls : this.calls).push("path");
+    if (zls) return options.repositoryRoot ? this.zlsRepositoryHome : this.zlsCheckoutPath;
     return options.repositoryRoot ? this.repositoryHome : this.checkoutPath;
   }
 
-  private resolveRef(ref: CheckoutResult["requested"]): string {
+  private resolveRef(ref: CheckoutResult["requested"], zls = false): string {
     if (ref.kind === "commit") return ref.value.toLowerCase();
-    const remote = this.refs.find((item) => item.kind === ref.kind && item.name === ref.value);
+    const refs = zls ? this.zlsRefs : this.refs;
+    const remote = refs.find((item) => item.kind === ref.kind && item.name === ref.value);
     if (!remote) throw new Error(`missing fake ref ${ref.kind}:${ref.value}`);
     return remote.commit;
   }
 
-  private async writeSource(commit: string): Promise<void> {
+  private async writeSource(commit: string, zls = false): Promise<void> {
+    if (zls) {
+      const metadata = this.zlsVersions.get(commit);
+      if (!metadata) throw new Error(`missing fake ZLS version metadata for ${commit}`);
+      await Deno.mkdir(this.zlsCheckoutPath, { recursive: true });
+      await Deno.writeTextFile(
+        join(this.zlsCheckoutPath, "build.zig.zon"),
+        `.{\n    .name = .zls,\n    .version = "${metadata.declaredVersion}",\n    .minimum_zig_version = "${metadata.minimumBuildVersion}",\n}\n`,
+      );
+      await Deno.writeTextFile(
+        join(this.zlsCheckoutPath, "build.zig"),
+        [
+          'const std = @import("std");',
+          'const builtin = @import("builtin");',
+          'const minimum_build_zig_version = @import("build.zig.zon").minimum_zig_version;',
+          ...(metadata.maximumBuildVersionExclusive === null ? [] : [
+            "const Build = blk: {",
+            `    const version = std.SemanticVersion.parse("${metadata.maximumBuildVersionExclusive}") catch unreachable;`,
+            "    if (builtin.zig_version.order(version) != .lt) {",
+            '        @compileError("The used Zig version is not yet supported by ZLS.");',
+            "    }",
+            "};",
+          ]),
+          "",
+        ].join("\n"),
+      );
+      return;
+    }
     const metadata = this.versions.get(commit);
     if (!metadata) throw new Error(`missing fake version metadata for ${commit}`);
     const [major, minor, patch] = metadata.base.split(".");
@@ -277,6 +420,13 @@ export class FakeSourceRef implements SourceRefApi {
         "find_package(llvm 21)",
         "find_package(clang 21)",
         "find_package(lld 21)",
+        "set(ZIG_BUILD_ARGS",
+        "  -Dno-langref",
+        ")",
+        'set(ZIG_EXTRA_BUILD_ARGS "" CACHE STRING "Extra zig build args")',
+        "if(ZIG_EXTRA_BUILD_ARGS)",
+        "  list(APPEND ZIG_BUILD_ARGS ${ZIG_EXTRA_BUILD_ARGS})",
+        "endif()",
         "install(SCRIPT cmake/install.cmake)",
         "",
       ].join("\n"),
@@ -287,13 +437,14 @@ export class FakeSourceRef implements SourceRefApi {
     ref: CheckoutResult["requested"],
     commit: string,
     cloned: boolean,
+    zls = false,
   ): CheckoutResult {
     return {
       operationId: "fake-operation",
-      id: { provider: "codeberg", name: "zig" },
-      repositoryHome: this.repositoryHome,
-      checkoutPath: this.checkoutPath,
-      url: "https://codeberg.org/ziglang/zig.git",
+      id: zls ? { provider: "github", name: "zls" } : { provider: "codeberg", name: "zig" },
+      repositoryHome: zls ? this.zlsRepositoryHome : this.repositoryHome,
+      checkoutPath: zls ? this.zlsCheckoutPath : this.checkoutPath,
+      url: zls ? ZLS_SOURCE_REPOSITORY_URL : "https://codeberg.org/ziglang/zig.git",
       mode: "pinned",
       requested: { ...ref },
       resolvedCommit: commit,
@@ -304,12 +455,18 @@ export class FakeSourceRef implements SourceRefApi {
   }
 }
 
-export class FakeProcessRunner implements ProcessRunner {
+export class FakeProcessRunner implements ProcessRunner, ZlsLspProtocolVerifier {
+  readonly contractVersion = ZLS_INSTALL_VERIFIER_CONTRACT_VERSION;
   readonly requests: ProcessRequest[] = [];
   readonly prefix: string;
   runExit: ProcessResult | null = null;
   wrongZigVersion = false;
+  wrongZlsVersion = false;
   zigVersion = "0.16.0";
+  failZlsBuild = false;
+  failZlsProtocol = false;
+  zlsBuildCount = 0;
+  zlsProtocolCalls = 0;
   omitLib = false;
   failDocs = false;
   omitDocsAsset: string | null = null;
@@ -321,9 +478,19 @@ export class FakeProcessRunner implements ProcessRunner {
     "AArch64 AMDGPU ARM AVR BPF Hexagon Lanai LoongArch Mips MSP430 NVPTX PowerPC RISCV SPIRV Sparc SystemZ VE WebAssembly X86 XCore";
   toolVersions: Partial<Record<"cmake" | "llvm" | "clang" | "lld", string>> = {};
   #installs = new Map<string, string>();
+  #zlsVersions = new Map<string, string>();
+  #latestZlsVersion: string | null = null;
 
   constructor(prefix: string) {
     this.prefix = prefix;
+  }
+
+  verify(
+    _input: ZlsLspProtocolVerifierInput,
+  ): Promise<ZlsLspProtocolVerification> {
+    this.zlsProtocolCalls++;
+    if (this.failZlsProtocol) return Promise.reject(new Error("synthetic ZLS protocol failure"));
+    return Promise.resolve({ initialized: true, shutdown: true });
   }
 
   async run(request: ProcessRequest): Promise<ProcessResult> {
@@ -355,6 +522,43 @@ export class FakeProcessRunner implements ProcessRunner {
       if (output === undefined) throw new Error("fake compile omitted output path");
       await writeElf64X86_64(output);
       return await this.result(request, "compiled\n");
+    }
+    if (
+      request.args[0] === "build" && /zig(?:\.exe)?$/.test(name) &&
+      request.args.some((argument) => argument.startsWith("-Dversion-string="))
+    ) {
+      this.zlsBuildCount++;
+      if (this.failZlsBuild) return await this.result(request, "", "ZLS build failed\n", 2);
+      const prefixIndex = request.args.indexOf("--prefix");
+      if (prefixIndex < 0 || request.args[prefixIndex + 1] === undefined) {
+        throw new Error("fake ZLS build omitted --prefix");
+      }
+      const install = request.args[prefixIndex + 1];
+      const executablePath = join(install, "bin", "zls");
+      const version = request.args.find((argument) => argument.startsWith("-Dversion-string="))!
+        .slice("-Dversion-string=".length);
+      const installationId = install.split(/[\\/]/).findLast((segment) =>
+        /^[0-9a-f]{64}$/.test(segment)
+      );
+      if (installationId === undefined) {
+        throw new Error("fake ZLS build path omitted installation ID");
+      }
+      this.#zlsVersions.set(installationId, version);
+      this.#latestZlsVersion = version;
+      await Deno.mkdir(dirname(executablePath), { recursive: true });
+      await writeElf64X86_64(executablePath);
+      return await this.result(request, "built ZLS\n");
+    }
+    if (request.args[0] === "--version" && /zls(?:\.exe)?$/.test(name)) {
+      const installationId = executable.split(/[\\/]/).findLast((segment) =>
+        /^[0-9a-f]{64}$/.test(segment)
+      );
+      const version = installationId === undefined
+        ? this.#latestZlsVersion ?? undefined
+        : this.#zlsVersions.get(installationId) ?? this.#latestZlsVersion ?? undefined;
+      if (version === undefined) throw new Error("fake ZLS version has no build record");
+      if (installationId !== undefined) this.#zlsVersions.set(installationId, version);
+      return await this.result(request, `${this.wrongZlsVersion ? "0.0.0" : version}\n`);
     }
     if (docsArgs[0] === "build" && docsArgs[1] === "docs" && /zig(?:\.exe)?$/.test(docsName)) {
       this.docsStarted?.();
@@ -498,4 +702,10 @@ function sameRef(
   right: CheckoutResult["requested"],
 ): boolean {
   return left.kind === right.kind && left.value === right.value;
+}
+
+function isZlsRepository(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const repository = value as { readonly provider?: unknown; readonly name?: unknown };
+  return repository.provider === "github" && repository.name === "zls";
 }

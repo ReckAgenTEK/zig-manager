@@ -7,6 +7,14 @@ import {
   assertThrows,
 } from "@std/assert";
 import { dirname, join } from "@std/path";
+import {
+  GLOBAL_PROFILE_FILE_NAME,
+  GLOBAL_PROFILE_FORMAT_HEADER,
+  GlobalProfileError,
+  GlobalProfileStore,
+  parseGlobalProfile,
+  serializeGlobalProfile,
+} from "../src/global_profile.ts";
 import { PlatformPaths } from "../src/platform_paths.ts";
 import { ScopePinStore } from "../src/scope_pin.ts";
 import {
@@ -18,6 +26,7 @@ import {
 import {
   generateBashActivation,
   generateBashDeactivation,
+  SessionShimError,
   SessionShimManager,
 } from "../src/session_shim.ts";
 
@@ -37,6 +46,11 @@ Deno.test("platform paths use only injected XDG, home, platform, and relocation 
   assertEquals(fallback.dataDir, "/home/test user/.local/share/zig-manager");
   assertEquals(fallback.cacheDir, "/home/test user/.cache/zig-manager");
   assertEquals(fallback.shimsDir, "/home/test user/.local/share/zig-manager/shims");
+  assertEquals(fallback.globalBinDir, "/home/test user/.deno/bin");
+  assertEquals(
+    fallback.globalProfileFile,
+    "/home/test user/.local/state/zig-manager/global-profile",
+  );
 
   const xdg = new PlatformPaths({
     env: {
@@ -52,6 +66,14 @@ Deno.test("platform paths use only injected XDG, home, platform, and relocation 
   assertEquals(xdg.stateDir, "/xdg/state/zig-manager");
   assertEquals(xdg.dataDir, "/xdg/data/zig-manager");
   assertEquals(xdg.cacheDir, "/injected/home/.cache/zig-manager");
+  assertEquals(xdg.globalProfileFile, "/xdg/state/zig-manager/global-profile");
+
+  const denoRoot = new PlatformPaths({
+    env: { DENO_INSTALL_ROOT: "/tools/deno root" },
+    home: "/injected/home",
+    platform: "linux",
+  });
+  assertEquals(denoRoot.globalBinDir, "/tools/deno root/bin");
 
   const relocated = new PlatformPaths({
     env: {
@@ -65,6 +87,7 @@ Deno.test("platform paths use only injected XDG, home, platform, and relocation 
   assertEquals(relocated.stateDir, "/isolated/manager home '$;[]/state");
   assertEquals(relocated.dataDir, "/isolated/manager home '$;[]/data");
   assertEquals(relocated.cacheDir, "/isolated/manager home '$;[]/cache");
+  assertEquals(relocated.globalProfileFile, "/isolated/manager home '$;[]/state/global-profile");
   assertEquals(
     relocated.assertDataPath(join(relocated.dataDir, "profiles", PROFILE_A)),
     join(relocated.dataDir, "profiles", PROFILE_A),
@@ -115,6 +138,88 @@ Deno.test("scope pin protocol accepts only the exact two-line v1 shape", () => {
     ]
   ) {
     assertThrows(() => parseScopePin(malformed), ScopePinError);
+  }
+});
+
+Deno.test("global profile protocol and state pointer store are strict and atomic", async () => {
+  const serialized = serializeGlobalProfile(PROFILE_A);
+  assertEquals(serialized, `${GLOBAL_PROFILE_FORMAT_HEADER}\nprofile=${PROFILE_A}\n`);
+  assertEquals(parseGlobalProfile(serialized).profileId, PROFILE_A);
+  assertEquals(parseGlobalProfile(serialized.slice(0, -1)).profileId, PROFILE_A);
+  for (
+    const malformed of [
+      `zig-manager-global-v2\nprofile=${PROFILE_A}\n`,
+      `${GLOBAL_PROFILE_FORMAT_HEADER}\r\nprofile=${PROFILE_A}\r\n`,
+      `${GLOBAL_PROFILE_FORMAT_HEADER}\nprofile=${PROFILE_A}\nextra=true\n`,
+      `${GLOBAL_PROFILE_FORMAT_HEADER}\nprofile=${"A".repeat(64)}\n`,
+      `${GLOBAL_PROFILE_FORMAT_HEADER}\nprofile=${"a".repeat(63)}\n`,
+      `${GLOBAL_PROFILE_FORMAT_HEADER}\nprofile=${PROFILE_A}\n\n`,
+      `${GLOBAL_PROFILE_FORMAT_HEADER}\nprofile =${PROFILE_A}\n`,
+    ]
+  ) {
+    assertThrows(() => parseGlobalProfile(malformed), GlobalProfileError);
+  }
+
+  const root = await Deno.makeTempDir({ prefix: "zig-manager-global-profile-" });
+  try {
+    const paths = new PlatformPaths({
+      env: { ZIG_MANAGER_HOME: join(root, "manager home '$;[]") },
+      home: join(root, "home"),
+      platform: "linux",
+    });
+    const store = new GlobalProfileStore(paths.globalProfileFile);
+    assertEquals(await store.read(), null);
+    await assertRejects(() => Deno.lstat(paths.stateDir), Deno.errors.NotFound);
+
+    assertEquals(await store.write(PROFILE_A), {
+      schema: GLOBAL_PROFILE_FORMAT_HEADER,
+      profileId: PROFILE_A,
+      pointerPath: paths.globalProfileFile,
+    });
+    assertEquals(await Deno.readTextFile(paths.globalProfileFile), serialized);
+    assertEquals((await store.read())?.profileId, PROFILE_A);
+
+    const original = await Deno.readTextFile(paths.globalProfileFile);
+    await assertRejects(() => store.write("A".repeat(64)), GlobalProfileError);
+    assertEquals(await Deno.readTextFile(paths.globalProfileFile), original);
+    await Deno.writeTextFile(
+      paths.globalProfileFile,
+      `zig-manager-global-v2\nprofile=${PROFILE_A}\n`,
+    );
+    await assertRejects(() => store.read(), GlobalProfileError, "first line");
+    await store.write(PROFILE_B);
+    assertEquals((await store.read())?.profileId, PROFILE_B);
+    assert(await store.remove());
+    assertFalse(await store.remove());
+    await Deno.writeTextFile(paths.globalProfileFile, "malformed pointer\n");
+    assert(await store.remove());
+
+    const outside = join(root, "outside-global-profile");
+    await Deno.writeTextFile(outside, serializeGlobalProfile(PROFILE_A));
+    await Deno.symlink(outside, paths.globalProfileFile);
+    await assertRejects(() => store.read(), GlobalProfileError, "physical regular file");
+    await assertRejects(() => store.write(PROFILE_B), GlobalProfileError, "physical regular file");
+    await assertRejects(() => store.remove(), GlobalProfileError, "physical regular file");
+    assertEquals(await Deno.readTextFile(outside), serializeGlobalProfile(PROFILE_A));
+    await Deno.remove(paths.globalProfileFile);
+
+    const realState = join(root, "real-state");
+    const linkedState = join(root, "linked-state");
+    await Deno.mkdir(realState);
+    await Deno.symlink(realState, linkedState);
+    const linkedStore = new GlobalProfileStore(join(linkedState, GLOBAL_PROFILE_FILE_NAME));
+    await assertRejects(() => linkedStore.read(), GlobalProfileError, "physical directory");
+    await assertRejects(
+      () => linkedStore.write(PROFILE_A),
+      GlobalProfileError,
+      "physical directory",
+    );
+
+    const names: string[] = [];
+    for await (const entry of Deno.readDir(paths.stateDir)) names.push(entry.name);
+    assertFalse(names.some((name) => name.includes(".tmp-")));
+  } finally {
+    await removeTree(root);
   }
 });
 
@@ -202,7 +307,7 @@ Deno.test("a malformed nearest pin blocks a valid parent pin", async () => {
   }
 });
 
-Deno.test("generated POSIX resolvers enforce nested pins and captured-base fallback", async () => {
+Deno.test("generated POSIX resolvers enforce local, global, then captured-base precedence", async () => {
   const root = await Deno.makeTempDir({ prefix: "zig-manager-shim-contract-" });
   try {
     const paths = new PlatformPaths({
@@ -212,18 +317,22 @@ Deno.test("generated POSIX resolvers enforce nested pins and captured-base fallb
     });
     const manager = new SessionShimManager(paths);
     const shims = await manager.install();
+    const persistent = await manager.installPersistent();
     assert((await Deno.stat(shims.zig)).mode! & 0o100);
     assert((await Deno.stat(shims.zls)).mode! & 0o100);
+    assert((await Deno.stat(persistent.zig)).mode! & 0o100);
+    assert((await Deno.stat(persistent.zls)).mode! & 0o100);
 
     const scriptText = await Deno.readTextFile(shims.zig);
     assertFalse(/(^|[;\s])eval([;\s]|$)/m.test(scriptText));
     assertFalse(/(^|[;\s])source([;\s]|$)/m.test(scriptText));
-    assertFalse(scriptText.includes("deno"));
+    assertFalse(scriptText.includes("deno run"));
     assertStringIncludes(scriptText, "ZM_BASE_PATH");
     assertEquals((await command("/bin/sh", ["-n", shims.zig], root)).code, 0);
 
     const managedA = join(paths.installsDir, "zig a '$", "bin", "zig");
     const managedB = join(paths.installsDir, "zig b ;[]", "bin", "zig");
+    const managedZlsB = join(paths.installsDir, "zls b ![]", "bin", "zls");
     await writeExecutable(
       managedA,
       '#!/bin/sh\nprintf \'managed-a|%s|%s\\n\' "${1-}" "$PWD"\n',
@@ -232,8 +341,14 @@ Deno.test("generated POSIX resolvers enforce nested pins and captured-base fallb
       managedB,
       '#!/bin/sh\nprintf \'managed-b|%s|%s\\n\' "${1-}" "$PWD"\n',
     );
+    await writeExecutable(
+      managedZlsB,
+      '#!/bin/sh\nprintf \'managed-zls-b|%s|%s\\n\' "${1-}" "$PWD"\n',
+    );
     await writeProfile(paths.profilesDir, PROFILE_A, managedA);
-    await writeProfile(paths.profilesDir, PROFILE_B, managedB);
+    await writeProfile(paths.profilesDir, PROFILE_B, managedB, managedZlsB);
+    const globalProfile = new GlobalProfileStore(paths.globalProfileFile);
+    await globalProfile.write(PROFILE_A);
 
     const fallbackDir = join(root, "fallback bin '$;[]");
     const decoyDir = join(root, "ambient decoy");
@@ -269,10 +384,61 @@ Deno.test("generated POSIX resolvers enforce nested pins and captured-base fallb
     assertEquals(nestedRun.code, 0);
     assertEquals(nestedRun.stdout, `managed-b|nested arg|${await Deno.realPath(deep)}\n`);
 
+    const globalRun = await command(shims.zig, ["global arg"], unpinned, resolverEnv);
+    assertEquals(globalRun.code, 0);
+    assertEquals(globalRun.stdout, `managed-a|global arg|${await Deno.realPath(unpinned)}\n`);
+    await globalProfile.write(PROFILE_B);
+    const updatedGlobalRun = await command(shims.zig, ["updated global"], unpinned, resolverEnv);
+    assertEquals(updatedGlobalRun.code, 0);
+    assertEquals(
+      updatedGlobalRun.stdout,
+      `managed-b|updated global|${await Deno.realPath(unpinned)}\n`,
+    );
+    const globalZlsRun = await command(shims.zls, ["global zls"], unpinned, resolverEnv);
+    assertEquals(globalZlsRun.code, 0);
+    assertEquals(
+      globalZlsRun.stdout,
+      `managed-zls-b|global zls|${await Deno.realPath(unpinned)}\n`,
+    );
+
+    const persistentEnv = { PATH: `${paths.globalBinDir}:${fallbackDir}` };
+    const persistentLocal = await command(
+      persistent.zig,
+      ["persistent local"],
+      deep,
+      persistentEnv,
+    );
+    assertEquals(persistentLocal.code, 0, persistentLocal.stderr);
+    assertEquals(
+      persistentLocal.stdout,
+      `managed-b|persistent local|${await Deno.realPath(deep)}\n`,
+    );
+    const persistentGlobal = await command(
+      persistent.zls,
+      ["persistent global"],
+      unpinned,
+      persistentEnv,
+    );
+    assertEquals(persistentGlobal.code, 0, persistentGlobal.stderr);
+    assertEquals(
+      persistentGlobal.stdout,
+      `managed-zls-b|persistent global|${await Deno.realPath(unpinned)}\n`,
+    );
+
+    await globalProfile.remove();
     const fallbackRun = await command(shims.zig, ["base arg"], unpinned, resolverEnv);
     assertEquals(fallbackRun.code, 0);
     assertEquals(fallbackRun.stdout, `fallback|base arg|${fallbackDir}\n`);
     assertFalse(fallbackRun.stdout.includes("ambient-decoy"));
+    const persistentFallback = await command(
+      persistent.zig,
+      ["persistent fallback"],
+      unpinned,
+      persistentEnv,
+    );
+    assertEquals(persistentFallback.code, 0, persistentFallback.stderr);
+    assertEquals(persistentFallback.stdout, `fallback|persistent fallback|${fallbackDir}\n`);
+    await globalProfile.write(PROFILE_B);
 
     const marker = join(root, "pin-was-executed");
     await Deno.writeTextFile(
@@ -310,6 +476,39 @@ Deno.test("generated POSIX resolvers enforce nested pins and captured-base fallb
     assertStringIncludes(noManagedZls.stderr, "has no managed zls");
     assertFalse(noManagedZls.stdout.includes("fallback-zls"));
 
+    await Deno.writeTextFile(
+      paths.globalProfileFile,
+      `zig-manager-global-v2\nprofile=${PROFILE_B}\n`,
+    );
+    const malformedGlobal = await command(shims.zig, [], unpinned, resolverEnv);
+    assertEquals(malformedGlobal.code, 126);
+    assertStringIncludes(malformedGlobal.stderr, "global profile pointer");
+    assertFalse(malformedGlobal.stdout.includes("fallback"));
+
+    const outsideGlobal = join(root, "outside valid global profile");
+    await Deno.writeTextFile(outsideGlobal, serializeGlobalProfile(PROFILE_B));
+    await Deno.remove(paths.globalProfileFile);
+    await Deno.symlink(outsideGlobal, paths.globalProfileFile);
+    const linkedGlobal = await command(shims.zig, [], unpinned, resolverEnv);
+    assertEquals(linkedGlobal.code, 126);
+    assertStringIncludes(linkedGlobal.stderr, "not a physical regular file");
+    assertFalse(linkedGlobal.stdout.includes("fallback"));
+    await Deno.remove(paths.globalProfileFile);
+
+    await Deno.mkdir(join(paths.profilesDir, PROFILE_C));
+    await globalProfile.write(PROFILE_C);
+    const missingGlobalZig = await command(shims.zig, [], unpinned, resolverEnv);
+    assertEquals(missingGlobalZig.code, 126);
+    assertStringIncludes(missingGlobalZig.stderr, "has no zig.path");
+    assertFalse(missingGlobalZig.stdout.includes("fallback"));
+
+    await globalProfile.write(PROFILE_A);
+    const missingGlobalZls = await command(shims.zls, [], unpinned, resolverEnv);
+    assertEquals(missingGlobalZls.code, 126);
+    assertStringIncludes(missingGlobalZls.stderr, "has no managed zls");
+    assertFalse(missingGlobalZls.stdout.includes("fallback-zls"));
+    await globalProfile.remove();
+
     const noFallback = await command(shims.zig, [], unpinned, {
       ...resolverEnv,
       ZM_BASE_PATH: join(root, "empty path"),
@@ -323,6 +522,39 @@ Deno.test("generated POSIX resolvers enforce nested pins and captured-base fallb
     });
     assertEquals(recursive.code, 126);
     assertStringIncludes(recursive.stderr, "refusing recursive zig fallback");
+
+    assertEquals(await manager.removePersistent(), { zig: true, zls: true });
+    assertEquals(await manager.removePersistent(), { zig: false, zls: false });
+  } finally {
+    await removeTree(root);
+  }
+});
+
+Deno.test("persistent resolvers never replace executables they do not own", async () => {
+  const root = await Deno.makeTempDir({ prefix: "zig-manager-persistent-ownership-" });
+  try {
+    const paths = new PlatformPaths({
+      env: { DENO_INSTALL_ROOT: join(root, "deno") },
+      home: join(root, "home"),
+      platform: "linux",
+    });
+    await Deno.mkdir(paths.globalBinDir, { recursive: true });
+    const unrelated = "#!/bin/sh\nprintf 'unrelated\\n'\n";
+    await Deno.writeTextFile(join(paths.globalBinDir, "zig"), unrelated, { mode: 0o755 });
+    const manager = new SessionShimManager(paths);
+    const internal = await manager.install();
+    await assertRejects(
+      () => manager.installPersistent(),
+      SessionShimError,
+      "refusing to replace",
+    );
+    assertEquals(await Deno.readTextFile(join(paths.globalBinDir, "zig")), unrelated);
+    await assertRejects(() => Deno.lstat(join(paths.globalBinDir, "zls")), Deno.errors.NotFound);
+    assertEquals(await manager.removePersistent(), { zig: false, zls: false });
+    assertEquals(await Deno.readTextFile(join(paths.globalBinDir, "zig")), unrelated);
+    const fallback = await command(internal.zig, [], root, { PATH: paths.globalBinDir });
+    assertEquals(fallback.code, 0, fallback.stderr);
+    assertEquals(fallback.stdout, "unrelated\n");
   } finally {
     await removeTree(root);
   }
@@ -424,10 +656,14 @@ async function writeProfile(
   profilesDir: string,
   profileId: string,
   zigPath: string,
+  zlsPath?: string,
 ): Promise<void> {
   const profileDir = join(profilesDir, profileId);
   await Deno.mkdir(profileDir, { recursive: true });
   await Deno.writeTextFile(join(profileDir, "zig.path"), `${zigPath}\n`);
+  if (zlsPath !== undefined) {
+    await Deno.writeTextFile(join(profileDir, "zls.path"), `${zlsPath}\n`);
+  }
 }
 
 async function removeTree(path: string): Promise<void> {

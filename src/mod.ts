@@ -1,17 +1,33 @@
 export {
   BUILD_RECIPE_ENVIRONMENT_KEYS,
   BUILD_RECIPE_TOOL_KEYS,
+  type BuildRecipeComponent,
   type BuildRecipeDependency,
   type BuildRecipeFileFingerprint,
   type BuildRecipePackageFingerprint,
   type BuildRecipeQueryRecord,
   type BuildRecipeToolFingerprint,
   type BuildRecipeToolKey,
+  type BuildRecipeV1,
+  createZlsBuildArguments,
+  isZlsBuildRecipe,
+  validateBuildRecipe,
   validateZigBuildRecipe,
+  validateZlsBuildRecipe,
   ZIG_BUILD_CONTRACT_VERSION,
   ZIG_BUILD_RECIPE_SCHEMA_VERSION,
   ZIG_INSTALL_VERIFIER_CONTRACT_VERSION,
   type ZigBuildRecipeV1,
+  ZLS_BUILD_CONTRACT_VERSION,
+  ZLS_BUILD_RECIPE_ADAPTER_ID,
+  ZLS_BUILD_RECIPE_ENVIRONMENT_KEYS,
+  ZLS_BUILD_RECIPE_SCHEMA_VERSION,
+  ZLS_INSTALL_VERIFIER_CONTRACT_VERSION,
+  type ZlsBuildProfile,
+  type ZlsBuildRecipeV1,
+  zlsOptimizeForProfile,
+  type ZlsOptimizeMode,
+  type ZlsZigExecutableFingerprint,
 } from "./build_recipe.ts";
 export {
   BUILD_MANIFEST_FILE,
@@ -97,7 +113,17 @@ export {
   GlobalOperationLockManager,
   type GlobalOperationLockTarget,
 } from "./global_operation_lock.ts";
-export { type CatalogV3, GlobalCatalog } from "./global_catalog.ts";
+export {
+  CATALOG_SCHEMA_VERSION,
+  type CatalogInstallationV3,
+  type CatalogProfileV3,
+  type CatalogV3,
+  CatalogValidationError,
+  GlobalCatalog,
+  readCatalog,
+  validateCatalog,
+} from "./global_catalog.ts";
+export * from "./global_profile.ts";
 export {
   computeInstallationId,
   type InstallComponent,
@@ -130,11 +156,33 @@ export {
 export { type Elf64X86_64Info, inspectElf64X86_64 } from "./elf.ts";
 export { PlatformPaths, resolvePlatformPaths } from "./platform_paths.ts";
 export {
+  computeProfileId,
+  createToolchainProfileIdentity,
+  type CreateToolchainProfileInput,
+  getToolchainProfileZlsSource,
+  isPairedToolchainProfile,
+  LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION,
+  type LegacyToolchainProfileV1,
+  type PairedProfileComponents,
+  type ProfileComponents,
+  type ProfileCreateResult,
+  type ProfileMutationOptions,
+  type ProfileSelectorIdentity,
   ProfileStore,
   ProfileStoreError,
+  type StoredToolchainProfile,
   type StoredToolchainProfileMetadata,
+  TOOLCHAIN_PROFILE_SCHEMA_VERSION,
+  type ToolchainHostIdentity,
+  type ToolchainProfile,
+  type ToolchainProfileIdentity,
+  type ToolchainProfileIdentityV1,
+  type ToolchainProfileIdentityV2,
   ToolchainProfileStore,
   type ToolchainProfileV1,
+  type ToolchainProfileV2,
+  validateToolchainProfile,
+  validateToolchainProfileIdentity,
 } from "./profile_store.ts";
 export { removeScopePin, ScopePinStore, writeScopePin } from "./scope_pin.ts";
 export {
@@ -166,8 +214,14 @@ export {
 export {
   generateBashActivation,
   generateBashDeactivation,
+  generatePosixResolverScript,
+  type InstalledSessionShims,
   installSessionShims,
+  type RemovedPersistentShims,
+  type ResolverTool,
+  SessionShimError,
   SessionShimManager,
+  type SessionShimPaths,
 } from "./session_shim.ts";
 export { SourceWorkspace } from "./source_workspace.ts";
 export {
@@ -202,6 +256,10 @@ export {
   type ZigCMakeSourceEvidence,
   type ZigSourceMetadata,
 } from "./source_version.ts";
+export * from "./zls_build.ts";
+export * from "./zls_install_pipeline.ts";
+export * from "./zls_source_version.ts";
+export * from "./zls_source_workspace.ts";
 export {
   compareZigVersions,
   listStableZigVersions,
@@ -270,7 +328,6 @@ export type {
   RevisionDescription,
   RunOptions,
   ScopeOperationOptions,
-  SetupResult,
   SourceRefApi,
   SourceRefDoctorResult,
   SourceSelectionState,
@@ -284,7 +341,10 @@ export type {
   ZigDoctorResult,
   ZigGcResult,
   ZigInstallResult,
+  ZigListInstallation,
+  ZigListProfile,
   ZigListResult,
+  ZigManagedComponentResult,
   ZigManagerBuildConfig,
   ZigManagerConfig,
   ZigManagerDocsConfig,
@@ -294,6 +354,7 @@ export type {
   ZigManagerState,
   ZigManagerStatus,
   ZigManagerToolConfig,
+  ZigManagerToolStatus,
   ZigManagerWarningConfig,
   ZigPurgeResult,
   ZigRepairRegistryStatus,

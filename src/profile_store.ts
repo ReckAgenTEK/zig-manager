@@ -18,8 +18,10 @@ import {
   validateResolvedSource,
   validateTimestamp,
 } from "./install_store.ts";
+import { type ResolvedZlsSource, validateResolvedZlsSource } from "./zls_source_workspace.ts";
 
-export const TOOLCHAIN_PROFILE_SCHEMA_VERSION = 1 as const;
+export const LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION = 1 as const;
+export const TOOLCHAIN_PROFILE_SCHEMA_VERSION = 2 as const;
 
 const HASH = /^[0-9a-f]{64}$/;
 const OPERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -34,6 +36,10 @@ export interface ToolchainHostIdentity {
 export interface ProfileComponents {
   readonly zig: string;
   readonly zls: string | null;
+}
+
+export interface PairedProfileComponents extends ProfileComponents {
+  readonly zls: string;
 }
 
 export interface ProfileSelectorIdentity {
@@ -52,7 +58,18 @@ export interface ToolchainProfileIdentityV1 {
   readonly selector: ProfileSelectorIdentity;
 }
 
-export interface ToolchainProfileV1 {
+export interface ToolchainProfileIdentityV2 {
+  readonly schemaVersion: 2;
+  readonly components: PairedProfileComponents;
+  readonly sources: {
+    readonly zig: ProfileSelectorIdentity;
+    readonly zls: ProfileSelectorIdentity;
+  };
+}
+
+export type ToolchainProfileIdentity = ToolchainProfileIdentityV1 | ToolchainProfileIdentityV2;
+
+export interface LegacyToolchainProfileV1 {
   readonly schemaVersion: 1;
   readonly profileId: string;
   readonly components: ProfileComponents;
@@ -61,10 +78,27 @@ export interface ToolchainProfileV1 {
   readonly createdAt: string;
 }
 
+export interface ToolchainProfileV2 {
+  readonly schemaVersion: 2;
+  readonly profileId: string;
+  readonly components: PairedProfileComponents;
+  readonly source: ResolvedSource;
+  readonly zlsSource: ResolvedZlsSource;
+  readonly host: ToolchainHostIdentity;
+  readonly createdAt: string;
+}
+
+export type ToolchainProfile = LegacyToolchainProfileV1 | ToolchainProfileV2;
+
+/** Published compatibility name retained for facade consumers of the common profile fields. */
+export type ToolchainProfileV1 = ToolchainProfile;
+
 export interface CreateToolchainProfileInput {
+  readonly schemaVersion?: 1 | 2;
   readonly zigInstallationId: string;
   readonly zlsInstallationId?: string | null;
   readonly source: ResolvedSource;
+  readonly zlsSource?: ResolvedZlsSource | null;
   readonly host: ToolchainHostIdentity;
   readonly createdAt?: string;
 }
@@ -72,7 +106,7 @@ export interface CreateToolchainProfileInput {
 export interface StoredToolchainProfileMetadata {
   readonly root: string;
   readonly manifestPath: string;
-  readonly profile: ToolchainProfileV1;
+  readonly profile: ToolchainProfile;
 }
 
 export interface StoredToolchainProfile extends StoredToolchainProfileMetadata {
@@ -89,7 +123,7 @@ export interface ProfileInstallSource {
 }
 
 export interface ProfileCatalogUpdater {
-  updateProfile(profile: ToolchainProfileV1): Promise<unknown>;
+  updateProfile(profile: ToolchainProfile): Promise<unknown>;
 }
 
 export interface ToolchainProfileStoreOptions {
@@ -149,36 +183,86 @@ export function validateHostIdentity(
 }
 
 export function createToolchainProfileIdentity(
-  input: Pick<CreateToolchainProfileInput, "zigInstallationId" | "zlsInstallationId" | "source">,
-): ToolchainProfileIdentityV1 {
-  const source = validateResolvedSource(input.source);
+  input: Pick<
+    CreateToolchainProfileInput,
+    "schemaVersion" | "zigInstallationId" | "zlsInstallationId" | "source" | "zlsSource"
+  >,
+): ToolchainProfileIdentity {
+  const source = validateZigSource(input.source);
+  const zigInstallationId = validateInstallationId(
+    input.zigInstallationId,
+    "zigInstallationId",
+  );
+  const zlsInstallationId = input.zlsInstallationId === undefined ||
+      input.zlsInstallationId === null
+    ? null
+    : validateInstallationId(input.zlsInstallationId, "zlsInstallationId");
+  const hasZlsSource = input.zlsSource !== undefined && input.zlsSource !== null;
+  if (input.schemaVersion !== undefined && input.schemaVersion !== 1 && input.schemaVersion !== 2) {
+    throw new TypeError("schemaVersion must equal 1 or 2");
+  }
+  if (input.schemaVersion === LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION && hasZlsSource) {
+    throw new TypeError("schema-v1 profile identity cannot include a ZLS source");
+  }
+  if (input.schemaVersion === 2 || hasZlsSource) {
+    if (zlsInstallationId === null || !hasZlsSource) {
+      throw new TypeError("schema-v2 profile identity requires ZLS installation ID and source");
+    }
+    const zlsSource = validateResolvedZlsSource(input.zlsSource, "zlsSource");
+    return {
+      schemaVersion: TOOLCHAIN_PROFILE_SCHEMA_VERSION,
+      components: { zig: zigInstallationId, zls: zlsInstallationId },
+      sources: {
+        zig: selectorIdentity(source),
+        zls: selectorIdentity(zlsSource),
+      },
+    };
+  }
   return {
-    schemaVersion: TOOLCHAIN_PROFILE_SCHEMA_VERSION,
+    schemaVersion: LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION,
     components: {
-      zig: validateInstallationId(input.zigInstallationId, "zigInstallationId"),
-      zls: input.zlsInstallationId === undefined || input.zlsInstallationId === null
-        ? null
-        : validateInstallationId(input.zlsInstallationId, "zlsInstallationId"),
+      zig: zigInstallationId,
+      zls: zlsInstallationId,
     },
-    selector: {
-      component: source.component,
-      repository: source.repository,
-      requestedSelector: source.requestedSelector,
-      resolvedRef: source.resolvedRef,
-      commit: source.commit,
-      version: source.version,
-      versionMetadata: source.versionMetadata,
-    },
+    selector: selectorIdentity(source),
   };
 }
 
 export function validateToolchainProfileIdentity(
   value: unknown,
-): ToolchainProfileIdentityV1 {
-  const root = strictObject(value, "identity", ["schemaVersion", "components", "selector"]);
-  equal(root.schemaVersion, TOOLCHAIN_PROFILE_SCHEMA_VERSION, "identity.schemaVersion");
-  const components = profileComponents(root.components, "identity.components");
-  const selector = strictObject(root.selector, "identity.selector", [
+): ToolchainProfileIdentity {
+  const discriminator = looseObject(value, "identity");
+  if (discriminator.schemaVersion === LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION) {
+    const root = strictObject(value, "identity", ["schemaVersion", "components", "selector"]);
+    const components = profileComponents(root.components, "identity.components");
+    return {
+      schemaVersion: LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION,
+      components,
+      selector: validateSelectorIdentity(root.selector, "identity.selector"),
+    };
+  }
+  if (discriminator.schemaVersion !== TOOLCHAIN_PROFILE_SCHEMA_VERSION) {
+    throw new TypeError("identity.schemaVersion must equal 1 or 2");
+  }
+  const root = strictObject(value, "identity", ["schemaVersion", "components", "sources"]);
+  const components = pairedProfileComponents(root.components, "identity.components");
+  const sources = strictObject(root.sources, "identity.sources", ["zig", "zls"]);
+  return {
+    schemaVersion: TOOLCHAIN_PROFILE_SCHEMA_VERSION,
+    components,
+    sources: {
+      zig: validateSelectorIdentity(sources.zig, "identity.sources.zig", "zig"),
+      zls: validateSelectorIdentity(sources.zls, "identity.sources.zls", "zls"),
+    },
+  };
+}
+
+function validateSelectorIdentity(
+  value: unknown,
+  path: string,
+  component?: "zig" | "zls",
+): ProfileSelectorIdentity {
+  const selector = strictObject(value, path, [
     "component",
     "repository",
     "requestedSelector",
@@ -196,47 +280,81 @@ export function validateToolchainProfileIdentity(
     version: selector.version,
     versionMetadata: selector.versionMetadata,
     resolvedAt: "1970-01-01T00:00:00.000Z",
-  });
+  }, path);
+  if (component !== undefined && syntheticSource.component !== component) {
+    throw new TypeError(`${path}.component must be '${component}'`);
+  }
   return {
-    schemaVersion: TOOLCHAIN_PROFILE_SCHEMA_VERSION,
-    components,
-    selector: {
-      component: syntheticSource.component,
-      repository: syntheticSource.repository,
-      requestedSelector: syntheticSource.requestedSelector,
-      resolvedRef: syntheticSource.resolvedRef,
-      commit: syntheticSource.commit,
-      version: syntheticSource.version,
-      versionMetadata: syntheticSource.versionMetadata,
-    },
+    component: syntheticSource.component,
+    repository: syntheticSource.repository,
+    requestedSelector: syntheticSource.requestedSelector,
+    resolvedRef: syntheticSource.resolvedRef,
+    commit: syntheticSource.commit,
+    version: syntheticSource.version,
+    versionMetadata: syntheticSource.versionMetadata,
   };
 }
 
-export async function computeProfileId(identity: ToolchainProfileIdentityV1): Promise<string> {
+export async function computeProfileId(identity: ToolchainProfileIdentity): Promise<string> {
   return await sha256Text(canonicalJson(validateToolchainProfileIdentity(identity)));
 }
 
-export function validateToolchainProfile(value: unknown): ToolchainProfileV1 {
+export function validateToolchainProfile(value: unknown): ToolchainProfile {
+  const discriminator = looseObject(value, "root");
+  if (discriminator.schemaVersion === LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION) {
+    const root = strictObject(value, "root", [
+      "schemaVersion",
+      "profileId",
+      "components",
+      "source",
+      "host",
+      "createdAt",
+    ]);
+    return {
+      schemaVersion: LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION,
+      profileId: validateProfileId(root.profileId),
+      components: profileComponents(root.components, "components"),
+      source: validateZigSource(root.source),
+      host: validateHostIdentity(root.host),
+      createdAt: validateTimestamp(root.createdAt, "createdAt"),
+    };
+  }
+  if (discriminator.schemaVersion !== TOOLCHAIN_PROFILE_SCHEMA_VERSION) {
+    throw new TypeError("schemaVersion must equal 1 or 2");
+  }
   const root = strictObject(value, "root", [
     "schemaVersion",
     "profileId",
     "components",
     "source",
+    "zlsSource",
     "host",
     "createdAt",
   ]);
-  equal(root.schemaVersion, TOOLCHAIN_PROFILE_SCHEMA_VERSION, "schemaVersion");
   return {
     schemaVersion: TOOLCHAIN_PROFILE_SCHEMA_VERSION,
     profileId: validateProfileId(root.profileId),
-    components: profileComponents(root.components, "components"),
-    source: validateResolvedSource(root.source),
+    components: pairedProfileComponents(root.components, "components"),
+    source: validateZigSource(root.source),
+    zlsSource: validateResolvedZlsSource(root.zlsSource, "zlsSource"),
     host: validateHostIdentity(root.host),
     createdAt: validateTimestamp(root.createdAt, "createdAt"),
   };
 }
 
-export async function readToolchainProfile(path: string): Promise<ToolchainProfileV1> {
+export function isPairedToolchainProfile(
+  profile: ToolchainProfile,
+): profile is ToolchainProfileV2 {
+  return profile.schemaVersion === TOOLCHAIN_PROFILE_SCHEMA_VERSION;
+}
+
+export function getToolchainProfileZlsSource(
+  profile: ToolchainProfile,
+): ResolvedZlsSource | null {
+  return isPairedToolchainProfile(profile) ? profile.zlsSource : null;
+}
+
+export async function readToolchainProfile(path: string): Promise<ToolchainProfile> {
   let value: unknown;
   try {
     value = JSON.parse(await Deno.readTextFile(path));
@@ -291,21 +409,32 @@ export class ToolchainProfileStore {
     const operationId = operationSegment(options.operationId ?? this.#createOperationId());
     throwIfAborted(options.signal, "create toolchain profile", this.profilesRoot);
     await this.#ensureLayout();
-    const identity = createToolchainProfileIdentity(input);
+    const schemaVersion = profileSchemaVersionForCreate(input);
+    const identity = createToolchainProfileIdentity({ ...input, schemaVersion });
     const profileId = await computeProfileId(identity);
-    const source = validateResolvedSource(input.source);
+    const source = validateZigSource(input.source);
     const host = validateHostIdentity(input.host);
     const createdAt = input.createdAt === undefined
       ? validateTimestamp(this.#now().toISOString(), "createdAt")
       : validateTimestamp(input.createdAt, "createdAt");
-    const profile = validateToolchainProfile({
-      schemaVersion: TOOLCHAIN_PROFILE_SCHEMA_VERSION,
-      profileId,
-      components: identity.components,
-      source,
-      host,
-      createdAt,
-    });
+    const profile = schemaVersion === TOOLCHAIN_PROFILE_SCHEMA_VERSION
+      ? validateToolchainProfile({
+        schemaVersion,
+        profileId,
+        components: identity.components,
+        source,
+        zlsSource: validateResolvedZlsSource(input.zlsSource, "zlsSource"),
+        host,
+        createdAt,
+      })
+      : validateToolchainProfile({
+        schemaVersion,
+        profileId,
+        components: identity.components,
+        source,
+        host,
+        createdAt,
+      });
     const installs = await this.#resolveInstalls(profile);
     throwIfAborted(options.signal, "create toolchain profile", this.profilesRoot);
     const destination = this.profilePath(profileId);
@@ -391,7 +520,7 @@ export class ToolchainProfileStore {
   }
 
   /** Read and hash-validate immutable profile metadata without requiring its installation. */
-  async read(profileId: string): Promise<ToolchainProfileV1> {
+  async read(profileId: string): Promise<ToolchainProfile> {
     return (await this.getMetadata(profileId)).profile;
   }
 
@@ -437,11 +566,7 @@ export class ToolchainProfileStore {
         { root, expected: validatedId, actual: profile.profileId },
       );
     }
-    const identity = createToolchainProfileIdentity({
-      zigInstallationId: profile.components.zig,
-      zlsInstallationId: profile.components.zls,
-      source: profile.source,
-    });
+    const identity = identityForProfile(profile);
     const computedId = await computeProfileId(identity);
     if (computedId !== validatedId) {
       throw new ProfileStoreError(
@@ -548,16 +673,20 @@ export class ToolchainProfileStore {
   }
 
   async #resolveInstalls(
-    profile: ToolchainProfileV1,
+    profile: ToolchainProfile,
   ): Promise<{ zig: InstalledObject; zls: InstalledObject | null }> {
     const zig = await this.#installs.get("zig", profile.components.zig);
     this.#assertInstallOwned(zig, "zig", profile.components.zig);
     assertSourceMatchesInstall(profile.source, zig);
+    assertHostMatchesInstall(profile.host, zig);
     if (profile.components.zls === null) return { zig, zls: null };
     const zls = await this.#installs.get("zls", profile.components.zls);
     this.#assertInstallOwned(zls, "zls", profile.components.zls);
+    if (isPairedToolchainProfile(profile)) assertSourceMatchesInstall(profile.zlsSource, zls);
+    assertHostMatchesInstall(profile.host, zls);
     if (
       zls.manifest.dependencies.length !== 1 ||
+      zls.manifest.dependencies[0].component !== "zig" ||
       zls.manifest.dependencies[0].installationId !== profile.components.zig
     ) {
       throw new ProfileStoreError(
@@ -577,6 +706,21 @@ export class ToolchainProfileStore {
     component: "zig" | "zls",
     installationId: string,
   ): void {
+    if (
+      install.manifest.component !== component ||
+      install.manifest.installationId !== installationId
+    ) {
+      throw new ProfileStoreError(
+        "PROFILE_INVALID",
+        `Profile ${component} component does not match its installation manifest`,
+        {
+          component,
+          installationId,
+          manifestComponent: install.manifest.component,
+          manifestInstallationId: install.manifest.installationId,
+        },
+      );
+    }
     const expectedRoot = join(this.dataRoot, "installs", component, installationId);
     if (
       resolve(install.root) !== expectedRoot ||
@@ -594,7 +738,7 @@ export class ToolchainProfileStore {
 
   async #verifyProfileDirectory(
     root: string,
-    profile: ToolchainProfileV1,
+    profile: ToolchainProfile,
     installs: { zig: InstalledObject; zls: InstalledObject | null },
     signal?: AbortSignal,
   ): Promise<{ zigPath: string; zlsPath: string | null }> {
@@ -631,8 +775,8 @@ export class ToolchainProfileStore {
   }
 
   async #reuseExisting(
-    incoming: ToolchainProfileV1,
-    identity: ToolchainProfileIdentityV1,
+    incoming: ToolchainProfile,
+    identity: ToolchainProfileIdentity,
   ): Promise<StoredToolchainProfile> {
     let existing: StoredToolchainProfile;
     try {
@@ -645,11 +789,7 @@ export class ToolchainProfileStore {
         { cause },
       );
     }
-    const existingIdentity = createToolchainProfileIdentity({
-      zigInstallationId: existing.profile.components.zig,
-      zlsInstallationId: existing.profile.components.zls,
-      source: existing.profile.source,
-    });
+    const existingIdentity = identityForProfile(existing.profile);
     if (
       canonicalJson(existingIdentity) !== canonicalJson(identity) ||
       canonicalJson(existing.profile.host) !== canonicalJson(incoming.host)
@@ -674,6 +814,64 @@ function profileComponents(value: unknown, path: string): ProfileComponents {
   };
 }
 
+function pairedProfileComponents(value: unknown, path: string): PairedProfileComponents {
+  const components = profileComponents(value, path);
+  if (components.zls === null) throw new TypeError(`${path}.zls must be a ZLS installation ID`);
+  return { zig: components.zig, zls: components.zls };
+}
+
+function validateZigSource(value: unknown, path = "source"): ResolvedSource {
+  const source = validateResolvedSource(value, path);
+  if (source.component !== "zig") throw new TypeError(`${path}.component must be 'zig'`);
+  return source;
+}
+
+function selectorIdentity(source: ResolvedSource): ProfileSelectorIdentity {
+  return {
+    component: source.component,
+    repository: source.repository,
+    requestedSelector: source.requestedSelector,
+    resolvedRef: source.resolvedRef,
+    commit: source.commit,
+    version: source.version,
+    versionMetadata: source.versionMetadata,
+  };
+}
+
+function profileSchemaVersionForCreate(input: CreateToolchainProfileInput): 1 | 2 {
+  if (input.schemaVersion !== undefined && input.schemaVersion !== 1 && input.schemaVersion !== 2) {
+    throw new TypeError("schemaVersion must equal 1 or 2");
+  }
+  const hasZlsInstallation = input.zlsInstallationId !== undefined &&
+    input.zlsInstallationId !== null;
+  const hasZlsSource = input.zlsSource !== undefined && input.zlsSource !== null;
+  if (hasZlsInstallation !== hasZlsSource) {
+    throw new TypeError("zlsInstallationId and zlsSource must be supplied together");
+  }
+  if (input.schemaVersion === LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION) {
+    if (hasZlsInstallation) {
+      throw new TypeError("schema-v1 profile creation cannot include ZLS");
+    }
+    return LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION;
+  }
+  if (input.schemaVersion === TOOLCHAIN_PROFILE_SCHEMA_VERSION && !hasZlsInstallation) {
+    throw new TypeError("schema-v2 profile creation requires ZLS installation ID and source");
+  }
+  return hasZlsInstallation
+    ? TOOLCHAIN_PROFILE_SCHEMA_VERSION
+    : LEGACY_TOOLCHAIN_PROFILE_SCHEMA_VERSION;
+}
+
+function identityForProfile(profile: ToolchainProfile): ToolchainProfileIdentity {
+  return createToolchainProfileIdentity({
+    schemaVersion: profile.schemaVersion,
+    zigInstallationId: profile.components.zig,
+    zlsInstallationId: profile.components.zls,
+    source: profile.source,
+    ...(isPairedToolchainProfile(profile) ? { zlsSource: profile.zlsSource } : {}),
+  });
+}
+
 function assertSourceMatchesInstall(source: ResolvedSource, install: InstalledObject): void {
   const expected = install.manifest.identity.source;
   if (
@@ -684,11 +882,27 @@ function assertSourceMatchesInstall(source: ResolvedSource, install: InstalledOb
   ) {
     throw new ProfileStoreError(
       "PROFILE_INVALID",
-      "Profile resolved source does not identify its Zig installation",
+      `Profile resolved source does not identify its ${install.manifest.component} installation`,
       {
-        zigInstallationId: install.manifest.installationId,
+        component: install.manifest.component,
+        installationId: install.manifest.installationId,
         sourceCommit: source.commit,
         installCommit: expected.commit,
+      },
+    );
+  }
+}
+
+function assertHostMatchesInstall(host: ToolchainHostIdentity, install: InstalledObject): void {
+  if (canonicalJson(host) !== canonicalJson(install.manifest.identity.host)) {
+    throw new ProfileStoreError(
+      "PROFILE_INVALID",
+      `Profile host does not match its ${install.manifest.component} installation`,
+      {
+        component: install.manifest.component,
+        installationId: install.manifest.installationId,
+        profileHost: host,
+        installationHost: install.manifest.identity.host,
       },
     );
   }
@@ -815,18 +1029,18 @@ function strictObject(
   path: string,
   keys: readonly string[],
 ): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError(`${path} must be an object`);
-  }
-  const result = value as Record<string, unknown>;
+  const result = looseObject(value, path);
   const unknown = Object.keys(result).filter((key) => !keys.includes(key)).sort();
   if (unknown.length > 0) throw new TypeError(`${path} contains unknown key '${unknown[0]}'`);
   for (const key of keys) if (!(key in result)) throw new TypeError(`${path}.${key} is required`);
   return result;
 }
 
-function equal(actual: unknown, expected: unknown, path: string): void {
-  if (actual !== expected) throw new TypeError(`${path} must equal ${String(expected)}`);
+function looseObject(value: unknown, path: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${path} must be an object`);
+  }
+  return value as Record<string, unknown>;
 }
 
 async function ensureDirectoryNoSymlink(path: string, recursive = false): Promise<void> {

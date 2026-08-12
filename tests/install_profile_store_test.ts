@@ -25,9 +25,19 @@ import {
 import {
   computeProfileId,
   createToolchainProfileIdentity,
+  getToolchainProfileZlsSource,
+  isPairedToolchainProfile,
   ToolchainProfileStore,
+  validateToolchainProfile,
 } from "../src/profile_store.ts";
 import { ZigManager } from "../src/zig_manager.ts";
+import { createZlsBuildRecipe } from "../src/zls_build.ts";
+import {
+  type ResolvedZlsSource,
+  validateResolvedZlsSource,
+  ZLS_SOURCE_REPOSITORY_IDENTITY,
+  ZLS_SOURCE_REPOSITORY_URL,
+} from "../src/zls_source_workspace.ts";
 import { elf64X86_64Fixture, zigVersionMetadata } from "./test_helpers.ts";
 
 const ZIG_COMMIT = "a".repeat(40);
@@ -74,6 +84,46 @@ Deno.test("installation and profile IDs are canonical and exclude timestamps", a
     await computeProfileId(createToolchainProfileIdentity({
       zigInstallationId: firstId,
       source: { ...source, requestedSelector: "stable" },
+    })),
+  );
+
+  const zlsSource = zlsSourceFixture({ resolvedAt: CREATED });
+  const pairedIdentity = createToolchainProfileIdentity({
+    zigInstallationId: firstId,
+    zlsInstallationId: "d".repeat(64),
+    source,
+    zlsSource,
+  });
+  const laterPairedIdentity = createToolchainProfileIdentity({
+    zigInstallationId: firstId,
+    zlsInstallationId: "d".repeat(64),
+    source: { ...source, resolvedAt: LATER },
+    zlsSource: { ...zlsSource, resolvedAt: LATER },
+  });
+  assertEquals(pairedIdentity.schemaVersion, 2);
+  assertEquals(
+    await computeProfileId(pairedIdentity),
+    await computeProfileId(laterPairedIdentity),
+  );
+  assertNotEquals(
+    await computeProfileId(pairedIdentity),
+    await computeProfileId(createToolchainProfileIdentity({
+      zigInstallationId: firstId,
+      zlsInstallationId: "d".repeat(64),
+      source,
+      zlsSource: {
+        ...zlsSource,
+        requestedSelector: `tag:${zlsSource.version}`,
+      },
+    })),
+  );
+  assertNotEquals(
+    await computeProfileId(pairedIdentity),
+    await computeProfileId(createToolchainProfileIdentity({
+      zigInstallationId: firstId,
+      zlsInstallationId: "e".repeat(64),
+      source,
+      zlsSource,
     })),
   );
 });
@@ -300,14 +350,67 @@ Deno.test("install inspection classifies corruption and explicit quarantine pres
   });
 });
 
-Deno.test("profiles reuse timestamp-only changes and support an optional compatible ZLS", async () => {
+Deno.test("profile store strictly reads published v1 profiles with optional ZLS", async () => {
   await withTempRoot(async (root) => {
     const dataRoot = join(root, "data");
     const installs = new InstallStore(dataRoot);
     const zig = await publishPrepared(installs, "zig");
+    const zls = await publishPrepared(installs, "zls", {
+      zigDependency: zig.manifest.installationId,
+    });
+    const profiles = new ToolchainProfileStore({ dataRoot, installs });
+    const identity = createToolchainProfileIdentity({
+      schemaVersion: 1,
+      zigInstallationId: zig.manifest.installationId,
+      zlsInstallationId: zls.manifest.installationId,
+      source: zig.manifest.source,
+    });
+    const profileId = await computeProfileId(identity);
+    const profile = {
+      schemaVersion: 1,
+      profileId,
+      components: {
+        zig: zig.manifest.installationId,
+        zls: zls.manifest.installationId,
+      },
+      source: zig.manifest.source,
+      host: HOST,
+      createdAt: CREATED,
+    };
+    const profileRoot = profiles.profilePath(profileId);
+    await Deno.mkdir(profileRoot, { recursive: true });
+    await Deno.writeTextFile(join(profileRoot, "profile.json"), `${JSON.stringify(profile)}\n`);
+    await Deno.writeTextFile(join(profileRoot, "zig.path"), `${zig.executablePath}\n`);
+    await Deno.writeTextFile(join(profileRoot, "zls.path"), `${zls.executablePath}\n`);
+
+    const read = await profiles.read(profileId);
+    assertEquals(read, validateToolchainProfile(profile));
+    assertEquals(read.schemaVersion, 1);
+    assert(!isPairedToolchainProfile(read));
+    assertEquals(getToolchainProfileZlsSource(read), null);
+    assertEquals((await profiles.get(profileId)).zlsPath, zls.executablePath);
+    assertEquals((await profiles.list()).map((entry) => entry.profile.profileId), [profileId]);
+    assertThrows(
+      () => validateToolchainProfile({ ...profile, zlsSource: zlsSourceFixture() }),
+      TypeError,
+      "unknown key",
+    );
+  });
+});
+
+Deno.test("paired v2 profiles require and preserve a complete compatible source pair", async () => {
+  await withTempRoot(async (root) => {
+    const dataRoot = join(root, "data");
+    const installs = new InstallStore(dataRoot);
+    const zig = await publishPrepared(installs, "zig");
+    const zls = await publishPrepared(installs, "zls", {
+      zigDependency: zig.manifest.installationId,
+    });
+    const zlsSource = zlsSourceFixture();
     const profiles = new ToolchainProfileStore({ dataRoot, installs });
 
     const withoutZls = await profiles.create({
+      schemaVersion: 1,
       zigInstallationId: zig.manifest.installationId,
       source: zig.manifest.source,
       host: HOST,
@@ -320,34 +423,120 @@ Deno.test("profiles reuse timestamp-only changes and support an optional compati
       await Deno.readTextFile(join(withoutZls.root, "zig.path")),
       `${zig.executablePath}\n`,
     );
-    const originalProfileBytes = await Deno.readTextFile(withoutZls.manifestPath);
 
-    const reused = await profiles.create({
-      zigInstallationId: zig.manifest.installationId,
-      source: { ...zig.manifest.source, resolvedAt: LATER },
-      host: HOST,
-      createdAt: LATER,
-    });
-    assertEquals(reused.profile.profileId, withoutZls.profile.profileId);
-    assertEquals(reused.reused, true);
-    assertEquals(await Deno.readTextFile(reused.manifestPath), originalProfileBytes);
+    await assertRejects(
+      () =>
+        profiles.create({
+          zigInstallationId: zig.manifest.installationId,
+          zlsInstallationId: zls.manifest.installationId,
+          source: zig.manifest.source,
+          host: HOST,
+        }),
+      TypeError,
+      "must be supplied together",
+    );
+    await assertRejects(
+      () =>
+        profiles.create({
+          zigInstallationId: zig.manifest.installationId,
+          source: zig.manifest.source,
+          zlsSource,
+          host: HOST,
+        }),
+      TypeError,
+      "must be supplied together",
+    );
+    await assertRejects(
+      () =>
+        profiles.create({
+          schemaVersion: 1,
+          zigInstallationId: zig.manifest.installationId,
+          zlsInstallationId: zls.manifest.installationId,
+          source: zig.manifest.source,
+          zlsSource,
+          host: HOST,
+        }),
+      TypeError,
+      "schema-v1 profile creation cannot include ZLS",
+    );
+    await assertRejects(
+      () =>
+        profiles.create({
+          schemaVersion: 2,
+          zigInstallationId: zig.manifest.installationId,
+          source: zig.manifest.source,
+          host: HOST,
+        }),
+      TypeError,
+      "requires ZLS installation ID and source",
+    );
+    await assertRejects(
+      () =>
+        profiles.create({
+          zigInstallationId: zig.manifest.installationId,
+          source: zlsSource,
+          host: HOST,
+        }),
+      TypeError,
+      "source.component must be 'zig'",
+    );
+    await assertRejects(
+      () =>
+        profiles.create({
+          zigInstallationId: zig.manifest.installationId,
+          zlsInstallationId: zls.manifest.installationId,
+          source: zig.manifest.source,
+          zlsSource,
+          host: { ...HOST, abi: "musl" },
+        }),
+      Error,
+      "Profile host does not match",
+    );
 
-    const zls = await publishPrepared(installs, "zls", {
-      zigDependency: zig.manifest.installationId,
-    });
     const withZls = await profiles.create({
       zigInstallationId: zig.manifest.installationId,
       zlsInstallationId: zls.manifest.installationId,
       source: zig.manifest.source,
+      zlsSource,
       host: HOST,
       createdAt: CREATED,
     });
     assertNotEquals(withZls.profile.profileId, withoutZls.profile.profileId);
+    assertEquals(withZls.profile.schemaVersion, 2);
+    const pairedProfile = withZls.profile;
+    assert(isPairedToolchainProfile(pairedProfile));
+    assertEquals(pairedProfile.source, zig.manifest.source);
+    assertEquals(pairedProfile.zlsSource, zlsSource);
+    assertEquals(getToolchainProfileZlsSource(pairedProfile), zlsSource);
     assertEquals(withZls.zlsPath, zls.executablePath);
     assertEquals(
       await Deno.readTextFile(join(withZls.root, "zls.path")),
       `${zls.executablePath}\n`,
     );
+    assertThrows(
+      () => {
+        const { zlsSource: _zlsSource, ...incomplete } = pairedProfile;
+        validateToolchainProfile(incomplete);
+      },
+      TypeError,
+      "zlsSource is required",
+    );
+
+    const originalProfileBytes = await Deno.readTextFile(withZls.manifestPath);
+    const reused = await profiles.create({
+      zigInstallationId: zig.manifest.installationId,
+      zlsInstallationId: zls.manifest.installationId,
+      source: { ...zig.manifest.source, resolvedAt: LATER },
+      zlsSource: { ...zlsSource, resolvedAt: LATER },
+      host: HOST,
+      createdAt: LATER,
+    });
+    assertEquals(reused.profile.profileId, withZls.profile.profileId);
+    assertEquals(reused.reused, true);
+    assertEquals(await Deno.readTextFile(reused.manifestPath), originalProfileBytes);
+    assertEquals((await profiles.read(withZls.profile.profileId)).createdAt, CREATED);
+    assertEquals((await profiles.get(withZls.profile.profileId)).zlsPath, zls.executablePath);
+    assertEquals((await profiles.list()).length, 2);
 
     const otherZig = await publishPrepared(installs, "zig", {
       commit: OTHER_COMMIT,
@@ -360,11 +549,19 @@ Deno.test("profiles reuse timestamp-only changes and support an optional compati
           zigInstallationId: otherZig.manifest.installationId,
           zlsInstallationId: zls.manifest.installationId,
           source: otherZig.manifest.source,
+          zlsSource,
           host: HOST,
         }),
       Error,
       "does not depend on its Zig",
     );
+
+    await Deno.remove(join(dataRoot, "installs"), { recursive: true });
+    const reconstructed = await profiles.read(withZls.profile.profileId);
+    assert(isPairedToolchainProfile(reconstructed));
+    assertEquals(reconstructed.source, zig.manifest.source);
+    assertEquals(reconstructed.zlsSource, zlsSource);
+    assertEquals((await profiles.listMetadata()).length, 2);
   });
 });
 
@@ -421,15 +618,23 @@ Deno.test("catalog rebuild and update index authoritative installs and profiles 
     const zls = await publishPrepared(installs, "zls", {
       zigDependency: zig.manifest.installationId,
     });
-    await profiles.create({
+    const zlsSource = zlsSourceFixture();
+    const paired = await profiles.create({
       zigInstallationId: zig.manifest.installationId,
       zlsInstallationId: zls.manifest.installationId,
       source: zig.manifest.source,
+      zlsSource,
       host: HOST,
     });
     const updated = await catalog.update();
     assertEquals(updated.installations.map((entry) => entry.component), ["zig", "zls"]);
     assertEquals(updated.profiles.length, 2);
+    const pairedEntry = updated.profiles.find((entry) =>
+      entry.profileId === paired.profile.profileId
+    );
+    assertEquals(pairedEntry?.profileSchemaVersion, 2);
+    assertEquals(pairedEntry?.source, zig.manifest.source);
+    assertEquals(pairedEntry?.zlsSource, zlsSource);
 
     await Deno.remove(catalog.catalogPath);
     assertEquals(await catalog.read(), null);
@@ -528,6 +733,7 @@ interface PrepareOptions {
   readonly zigDependency?: string;
   readonly commit?: string;
   readonly version?: string;
+  readonly host?: typeof HOST;
 }
 
 interface PreparedInstall {
@@ -550,6 +756,8 @@ async function prepareInstall(
     options.recipe ?? { profile: "release", cpu: "baseline" },
     options.commit,
     options.version,
+    options.resolvedAt,
+    options.host,
   );
   const installationId = await computeInstallationId(identity);
   const staging = await store.createStaging(component, installationId);
@@ -583,7 +791,7 @@ async function prepareInstall(
     paths: { executable: executableRelative, libraries },
     executable: {
       version: source.version,
-      hostTarget: HOST.denoTarget,
+      hostTarget: (options.host ?? HOST).denoTarget,
       size: metadata.size,
       sha256: metadata.sha256,
       format: {
@@ -600,7 +808,7 @@ async function prepareInstall(
     commands: [],
     dependencies,
     createdAt: options.createdAt ?? CREATED,
-    verifierContractVersion: 2,
+    verifierContractVersion: identity.adapter.verifierContractVersion,
   });
   return { installationId, staging, manifest };
 }
@@ -620,7 +828,29 @@ function identityFixture(
   recipe: Readonly<Record<string, unknown>>,
   commit?: string,
   version?: string,
+  resolvedAt?: string,
+  host = HOST,
 ): InstallIdentityV1 {
+  if (component === "zls") {
+    if (dependencies.length !== 1 || dependencies[0].component !== "zig") {
+      throw new TypeError("ZLS fixture requires exactly one Zig dependency");
+    }
+    return createZlsBuildRecipe({
+      source: zlsSourceFixture({ commit, version, resolvedAt }),
+      host,
+      zigInstallationId: dependencies[0].installationId,
+      zigExecutable: {
+        installPath: "install/bin/zig",
+        size: 1,
+        sha256: "e".repeat(64),
+      },
+      adapter: {
+        id: `fixture:${canonicalJson(recipe)}`,
+        buildContractVersion: 1,
+        verifierContractVersion: 1,
+      },
+    });
+  }
   const source = sourceFixture(component, { commit, version });
   const environment = {
     CFLAGS: "",
@@ -662,7 +892,7 @@ function identityFixture(
       buildContractVersion: 1,
       verifierContractVersion: 2,
     },
-    host: HOST,
+    host,
     cpuPolicy: "baseline",
     build: {
       strategy: "cmake",
@@ -682,6 +912,7 @@ function identityFixture(
         "-G",
         "Ninja",
         "-DCMAKE_INSTALL_PREFIX=$BUILD/install",
+        "-DZIG_EXTRA_BUILD_ARGS=-Dno-langref",
       ],
       buildArguments: ["--build", "$BUILD/cmake-build"],
     },
@@ -712,13 +943,12 @@ function sourceFixture(
   options: { readonly commit?: string; readonly version?: string; readonly resolvedAt?: string } =
     {},
 ): ResolvedSource {
+  if (component === "zls") return zlsSourceFixture(options);
   const commit = options.commit ?? (component === "zig" ? ZIG_COMMIT : ZLS_COMMIT);
   const version = options.version ?? (component === "zig" ? "0.16.0" : "0.14.0");
   return {
     component,
-    repository: component === "zig"
-      ? { identity: "codeberg/zig", url: "https://codeberg.org/ziglang/zig.git" }
-      : { identity: "codeberg/zls", url: "https://codeberg.org/zigtools/zls.git" },
+    repository: { identity: "codeberg/zig", url: "https://codeberg.org/ziglang/zig.git" },
     requestedSelector: version,
     resolvedRef: { kind: "tag", value: version },
     commit,
@@ -726,6 +956,36 @@ function sourceFixture(
     versionMetadata: zigVersionMetadata(commit, version),
     resolvedAt: options.resolvedAt ?? CREATED,
   };
+}
+
+function zlsSourceFixture(
+  options: { readonly commit?: string; readonly version?: string; readonly resolvedAt?: string } =
+    {},
+): ResolvedZlsSource {
+  const commit = options.commit ?? ZLS_COMMIT;
+  const version = options.version ?? "0.14.0";
+  return validateResolvedZlsSource({
+    component: "zls",
+    repository: {
+      identity: ZLS_SOURCE_REPOSITORY_IDENTITY,
+      url: ZLS_SOURCE_REPOSITORY_URL,
+    },
+    requestedSelector: version,
+    resolvedRef: { kind: "tag", value: version },
+    commit,
+    version,
+    versionMetadata: {
+      kind: "release",
+      declaredVersion: version,
+      base: version,
+      text: version,
+      versionString: version,
+      taggedAncestor: version,
+      commitsAfterTag: 0,
+      commitAbbreviation: commit.slice(0, 9),
+    },
+    resolvedAt: options.resolvedAt ?? CREATED,
+  });
 }
 
 async function withTempRoot(action: (root: string) => Promise<void>): Promise<void> {

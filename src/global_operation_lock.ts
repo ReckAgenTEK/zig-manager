@@ -19,6 +19,7 @@ const OWNER_KEYS = new Set([
 export type GlobalOperationLockTarget =
   | { readonly kind: "source" }
   | { readonly kind: "catalog" }
+  | { readonly kind: "global" }
   | { readonly kind: "scope"; readonly scopeKey: string }
   | { readonly kind: "install"; readonly installationId: string };
 
@@ -251,6 +252,8 @@ export class GlobalOperationLockManager {
         return containedChild(this.locksRoot, "source.lock");
       case "catalog":
         return containedChild(this.locksRoot, "catalog.lock");
+      case "global":
+        return containedChild(this.locksRoot, "global.lock");
       case "scope":
         return containedChild(this.locksRoot, "scopes", `${target.scopeKey}.lock`);
       case "install":
@@ -331,6 +334,12 @@ export class GlobalOperationLockManager {
     return this.acquire({ kind: "catalog" }, options);
   }
 
+  acquireGlobal(
+    options: GlobalOperationLockAcquireOptions,
+  ): Promise<GlobalOperationLock> {
+    return this.acquire({ kind: "global" }, options);
+  }
+
   acquireScope(
     scopeKey: string,
     options: GlobalOperationLockAcquireOptions,
@@ -395,6 +404,7 @@ export class GlobalOperationLockManager {
     const topNames = new Set(topEntries.map((entry) => entry.name));
     if (topNames.has("source.lock")) await inspectTarget({ kind: "source" });
     if (topNames.has("catalog.lock")) await inspectTarget({ kind: "catalog" });
+    if (topNames.has("global.lock")) await inspectTarget({ kind: "global" });
 
     for (const category of ["scopes", "installs"] as const) {
       if (!topNames.has(category)) continue;
@@ -425,6 +435,7 @@ export class GlobalOperationLockManager {
     for (const entry of topEntries) {
       if (
         entry.name !== "source.lock" && entry.name !== "catalog.lock" &&
+        entry.name !== "global.lock" &&
         entry.name !== "scopes" && entry.name !== "installs"
       ) uncertain.push(resolve(this.locksRoot, entry.name));
     }
@@ -707,7 +718,7 @@ export async function computeScopeOperationLockKey(physicalScopePath: string): P
 
 function validateTarget(value: GlobalOperationLockTarget): GlobalOperationLockTarget {
   const root = strictObject(value, "lock target");
-  if (root.kind === "source" || root.kind === "catalog") {
+  if (root.kind === "source" || root.kind === "catalog" || root.kind === "global") {
     rejectUnknown(root, new Set(["kind"]), "lock target");
     return { kind: root.kind };
   }
@@ -722,7 +733,7 @@ function validateTarget(value: GlobalOperationLockTarget): GlobalOperationLockTa
       installationId: safeKey(root.installationId, "lock target installationId"),
     };
   }
-  throw new TypeError("lock target kind must be source, catalog, scope, or install");
+  throw new TypeError("lock target kind must be source, catalog, global, scope, or install");
 }
 
 function validateAcquireOptions(

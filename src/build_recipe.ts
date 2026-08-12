@@ -1,10 +1,16 @@
 import { isAbsolute, resolve } from "@std/path";
 import { validateZigSourceVersion } from "./source_version.ts";
 import type { NormalizedBuildOptions, ZigSourceVersion } from "./types.ts";
+import { type ResolvedZlsSource, validateResolvedZlsSource } from "./zls_source_workspace.ts";
+import { validateZlsSourceVersion, type ZlsSourceVersion } from "./zls_source_version.ts";
 
 export const ZIG_BUILD_RECIPE_SCHEMA_VERSION = 1 as const;
-export const ZIG_BUILD_CONTRACT_VERSION = 1 as const;
+export const ZLS_BUILD_RECIPE_SCHEMA_VERSION = 1 as const;
+export const ZIG_BUILD_CONTRACT_VERSION = 2 as const;
 export const ZIG_INSTALL_VERIFIER_CONTRACT_VERSION = 2 as const;
+export const ZLS_BUILD_RECIPE_ADAPTER_ID = "zls-source-build" as const;
+export const ZLS_BUILD_CONTRACT_VERSION = 1 as const;
+export const ZLS_INSTALL_VERIFIER_CONTRACT_VERSION = 1 as const;
 
 const HASH = /^[0-9a-f]{64}$/;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -79,6 +85,55 @@ export interface BuildRecipeDependency {
   readonly installationId: string;
 }
 
+export type ZlsBuildProfile = "debug" | "release-safe" | "release-fast" | "release-small";
+export type ZlsOptimizeMode = "Debug" | "ReleaseSafe" | "ReleaseFast" | "ReleaseSmall";
+
+export interface ZlsZigExecutableFingerprint {
+  /** Canonical path within the dependency installation, never its machine-local absolute path. */
+  readonly installPath: string;
+  readonly size: number;
+  readonly sha256: string;
+}
+
+export interface ZlsBuildRecipeSource {
+  readonly repository: BuildRecipeRepository;
+  readonly commit: string;
+  readonly version: ZlsSourceVersion;
+  /** Exact resolution record, including selector/ref provenance and observation time. */
+  readonly resolved: ResolvedZlsSource;
+}
+
+/** A source-built ZLS recipe is deliberately distinct from the CMake-backed Zig recipe. */
+export interface ZlsBuildRecipeV1 {
+  readonly schemaVersion: 1;
+  readonly component: "zls";
+  readonly source: ZlsBuildRecipeSource;
+  readonly adapter: {
+    readonly id: string;
+    readonly buildContractVersion: number;
+    readonly verifierContractVersion: number;
+  };
+  readonly host: BuildRecipeHost;
+  readonly build: {
+    readonly strategy: "zig";
+    readonly profile: ZlsBuildProfile;
+    readonly optimize: ZlsOptimizeMode;
+    readonly jobs: number | null;
+    readonly arguments: readonly string[];
+  };
+  readonly environment: {
+    readonly clearEnv: true;
+    readonly inherited: readonly [];
+    readonly variables: Readonly<Record<string, string>>;
+  };
+  readonly zig: {
+    readonly executable: ZlsZigExecutableFingerprint;
+  };
+  readonly dependencies: readonly [BuildRecipeDependency];
+}
+
+export type BuildRecipeV1 = ZigBuildRecipeV1 | ZlsBuildRecipeV1;
+
 export interface ZigBuildRecipeV1 {
   readonly schemaVersion: 1;
   readonly component: BuildRecipeComponent;
@@ -131,6 +186,8 @@ export const BUILD_RECIPE_ENVIRONMENT_KEYS: readonly string[] = Object.freeze(
   ] as const,
 );
 
+export const ZLS_BUILD_RECIPE_ENVIRONMENT_KEYS: readonly string[] = BUILD_RECIPE_ENVIRONMENT_KEYS;
+
 const EMPTY_ENVIRONMENT_KEYS = new Set([
   "CFLAGS",
   "CXXFLAGS",
@@ -143,6 +200,238 @@ const EMPTY_ENVIRONMENT_KEYS = new Set([
   "CMAKE_PREFIX_PATH",
   "PKG_CONFIG_PATH",
 ]);
+
+/** Validate either recipe without interpreting one component's fields as the other's. */
+export function validateBuildRecipe(value: unknown, path = "recipe"): BuildRecipeV1 {
+  const root = looseObject(value, path);
+  if (root.component === "zig") return validateZigBuildRecipe(value, path);
+  if (root.component !== "zls") {
+    throw new TypeError(`${path}.component must be 'zig' or 'zls'`);
+  }
+  const build = looseObject(root.build, `${path}.build`);
+  if (build.strategy === "zig") return validateZlsBuildRecipe(value, path);
+  // The v1 schema historically admitted CMake-shaped ZLS records. Keep those readable while all
+  // newly created source-built ZLS records use the distinct Zig strategy above.
+  return validateZigBuildRecipe(value, path);
+}
+
+export function isZlsBuildRecipe(recipe: BuildRecipeV1): recipe is ZlsBuildRecipeV1 {
+  return recipe.component === "zls" && recipe.build.strategy === "zig";
+}
+
+export function zlsOptimizeForProfile(profile: ZlsBuildProfile): ZlsOptimizeMode {
+  switch (profile) {
+    case "debug":
+      return "Debug";
+    case "release-safe":
+      return "ReleaseSafe";
+    case "release-fast":
+      return "ReleaseFast";
+    case "release-small":
+      return "ReleaseSmall";
+  }
+}
+
+export function createZlsBuildArguments(input: {
+  readonly versionString: string;
+  readonly optimize: ZlsOptimizeMode;
+  readonly jobs: number | null;
+}): readonly string[] {
+  const result = [
+    "build",
+    `-Dversion-string=${text(input.versionString, "versionString")}`,
+    `-Doptimize=${input.optimize}`,
+    "--prefix",
+    "$BUILD/install",
+    "--prefix-exe-dir",
+    "bin",
+  ];
+  if (input.jobs !== null) result.push(`-j${positiveSafeInteger(input.jobs, "jobs")}`);
+  return result;
+}
+
+/** Strict validation for the path-independent, Zig-built ZLS recipe. */
+export function validateZlsBuildRecipe(value: unknown, path = "recipe"): ZlsBuildRecipeV1 {
+  const root = strictObject(value, path, [
+    "schemaVersion",
+    "component",
+    "source",
+    "adapter",
+    "host",
+    "build",
+    "environment",
+    "zig",
+    "dependencies",
+  ]);
+  equal(root.schemaVersion, ZIG_BUILD_RECIPE_SCHEMA_VERSION, `${path}.schemaVersion`);
+  equal(root.component, "zls", `${path}.component`);
+  const sourceValue = strictObject(root.source, `${path}.source`, [
+    "repository",
+    "commit",
+    "version",
+    "resolved",
+  ]);
+  const resolvedSource = validateResolvedZlsSource(
+    sourceValue.resolved,
+    `${path}.source.resolved`,
+  );
+  const source: ZlsBuildRecipeSource = {
+    repository: repository(sourceValue.repository, `${path}.source.repository`),
+    commit: objectId(sourceValue.commit, `${path}.source.commit`),
+    version: validateZlsSourceVersion(sourceValue.version, `${path}.source.version`),
+    resolved: resolvedSource,
+  };
+  if (
+    canonicalObject(source.repository) !== canonicalObject(resolvedSource.repository) ||
+    source.commit !== resolvedSource.commit ||
+    canonicalObject(source.version) !== canonicalObject(resolvedSource.versionMetadata)
+  ) throw new TypeError(`${path}.source fields must exactly match ${path}.source.resolved`);
+
+  const adapterValue = strictObject(root.adapter, `${path}.adapter`, [
+    "id",
+    "buildContractVersion",
+    "verifierContractVersion",
+  ]);
+  const adapter = {
+    id: text(adapterValue.id, `${path}.adapter.id`),
+    buildContractVersion: positiveSafeInteger(
+      adapterValue.buildContractVersion,
+      `${path}.adapter.buildContractVersion`,
+    ),
+    verifierContractVersion: positiveSafeInteger(
+      adapterValue.verifierContractVersion,
+      `${path}.adapter.verifierContractVersion`,
+    ),
+  };
+
+  const hostValue = strictObject(root.host, `${path}.host`, [
+    "os",
+    "architecture",
+    "abi",
+    "denoTarget",
+  ]);
+  const host: BuildRecipeHost = {
+    os: text(hostValue.os, `${path}.host.os`),
+    architecture: text(hostValue.architecture, `${path}.host.architecture`),
+    abi: text(hostValue.abi, `${path}.host.abi`),
+    denoTarget: text(hostValue.denoTarget, `${path}.host.denoTarget`),
+  };
+
+  const buildValue = strictObject(root.build, `${path}.build`, [
+    "strategy",
+    "profile",
+    "optimize",
+    "jobs",
+    "arguments",
+  ]);
+  equal(buildValue.strategy, "zig", `${path}.build.strategy`);
+  const profile = zlsBuildProfile(buildValue.profile, `${path}.build.profile`);
+  const optimize = zlsOptimizeMode(buildValue.optimize, `${path}.build.optimize`);
+  if (optimize !== zlsOptimizeForProfile(profile)) {
+    throw new TypeError(`${path}.build.optimize does not match ${path}.build.profile`);
+  }
+  const jobs = buildValue.jobs === null
+    ? null
+    : positiveSafeInteger(buildValue.jobs, `${path}.build.jobs`);
+  const argumentsValue = stringArray(buildValue.arguments, `${path}.build.arguments`, true);
+  const expectedArguments = createZlsBuildArguments({
+    versionString: source.version.versionString,
+    optimize,
+    jobs,
+  });
+  if (JSON.stringify(argumentsValue) !== JSON.stringify(expectedArguments)) {
+    throw new TypeError(`${path}.build.arguments must equal the canonical ZLS build arguments`);
+  }
+
+  const environmentValue = strictObject(root.environment, `${path}.environment`, [
+    "clearEnv",
+    "inherited",
+    "variables",
+  ]);
+  equal(environmentValue.clearEnv, true, `${path}.environment.clearEnv`);
+  if (!Array.isArray(environmentValue.inherited) || environmentValue.inherited.length !== 0) {
+    throw new TypeError(`${path}.environment.inherited must be empty`);
+  }
+  const variablesValue = strictObject(
+    environmentValue.variables,
+    `${path}.environment.variables`,
+    ZLS_BUILD_RECIPE_ENVIRONMENT_KEYS,
+  );
+  const variables: Record<string, string> = {};
+  for (const key of ZLS_BUILD_RECIPE_ENVIRONMENT_KEYS) {
+    variables[key] = text(
+      variablesValue[key],
+      `${path}.environment.variables.${key}`,
+      true,
+    );
+    if (EMPTY_ENVIRONMENT_KEYS.has(key) && variables[key] !== "") {
+      throw new TypeError(`${path}.environment.variables.${key} must be explicitly empty`);
+    }
+  }
+  equal(variables.LANG, "C", `${path}.environment.variables.LANG`);
+  equal(variables.LC_ALL, "C", `${path}.environment.variables.LC_ALL`);
+  equal(variables.PATH, "$ZIG_BIN", `${path}.environment.variables.PATH`);
+  equal(variables.HOME, "$BUILD/home", `${path}.environment.variables.HOME`);
+  equal(variables.TMPDIR, "$BUILD/tmp", `${path}.environment.variables.TMPDIR`);
+  equal(
+    variables.XDG_CACHE_HOME,
+    "$BUILD/cache/xdg",
+    `${path}.environment.variables.XDG_CACHE_HOME`,
+  );
+  equal(
+    variables.ZIG_GLOBAL_CACHE_DIR,
+    "$BUILD/cache/zig-global",
+    `${path}.environment.variables.ZIG_GLOBAL_CACHE_DIR`,
+  );
+  equal(
+    variables.ZIG_LOCAL_CACHE_DIR,
+    "$BUILD/cache/zig-local",
+    `${path}.environment.variables.ZIG_LOCAL_CACHE_DIR`,
+  );
+
+  const zigValue = strictObject(root.zig, `${path}.zig`, ["executable"]);
+  const executableValue = strictObject(zigValue.executable, `${path}.zig.executable`, [
+    "installPath",
+    "size",
+    "sha256",
+  ]);
+  const executable: ZlsZigExecutableFingerprint = {
+    installPath: canonicalInstallPath(
+      executableValue.installPath,
+      `${path}.zig.executable.installPath`,
+    ),
+    size: positiveSafeInteger(executableValue.size, `${path}.zig.executable.size`),
+    sha256: digest(executableValue.sha256, `${path}.zig.executable.sha256`),
+  };
+
+  if (!Array.isArray(root.dependencies) || root.dependencies.length !== 1) {
+    throw new TypeError(`${path}.dependencies must contain exactly one Zig installation`);
+  }
+  const dependencyValue = strictObject(root.dependencies[0], `${path}.dependencies[0]`, [
+    "component",
+    "installationId",
+  ]);
+  equal(dependencyValue.component, "zig", `${path}.dependencies[0].component`);
+  const dependency: BuildRecipeDependency = {
+    component: "zig",
+    installationId: digest(
+      dependencyValue.installationId,
+      `${path}.dependencies[0].installationId`,
+    ),
+  };
+
+  return {
+    schemaVersion: ZIG_BUILD_RECIPE_SCHEMA_VERSION,
+    component: "zls",
+    source,
+    adapter,
+    host,
+    build: { strategy: "zig", profile, optimize, jobs, arguments: argumentsValue },
+    environment: { clearEnv: true, inherited: [], variables },
+    zig: { executable },
+    dependencies: [dependency],
+  };
+}
 
 /** Strict runtime validation for the complete canonical component recipe. */
 export function validateZigBuildRecipe(value: unknown, path = "recipe"): ZigBuildRecipeV1 {
@@ -233,7 +522,13 @@ export function validateZigBuildRecipe(value: unknown, path = "recipe"): ZigBuil
     `${path}.cmake.buildArguments`,
     true,
   );
-  validateCmakeArguments(configureArguments, buildArguments, build, `${path}.cmake`);
+  validateCmakeArguments(
+    configureArguments,
+    buildArguments,
+    build,
+    adapter.buildContractVersion,
+    `${path}.cmake`,
+  );
 
   const environmentValue = strictObject(root.environment, `${path}.environment`, [
     "clearEnv",
@@ -383,6 +678,7 @@ function validateCmakeArguments(
   configure: readonly string[],
   build: readonly string[],
   options: NormalizedBuildOptions,
+  buildContractVersion: number,
   path: string,
 ): void {
   if (configure[0] !== "-S" || configure[1] !== "$SOURCE") {
@@ -396,6 +692,19 @@ function validateCmakeArguments(
   }
   if (!configure.includes("-DCMAKE_INSTALL_PREFIX=$BUILD/install")) {
     throw new TypeError(`${path}.configureArguments must use the canonical install placeholder`);
+  }
+  const extraBuildArguments = configure.filter((argument) =>
+    argument.startsWith("-DZIG_EXTRA_BUILD_ARGS=")
+  );
+  const requiresNoLangref = buildContractVersion >= ZIG_BUILD_CONTRACT_VERSION;
+  if (
+    requiresNoLangref &&
+    (extraBuildArguments.length !== 1 ||
+      extraBuildArguments[0] !== "-DZIG_EXTRA_BUILD_ARGS=-Dno-langref")
+  ) {
+    throw new TypeError(
+      `${path}.configureArguments must disable language-reference installation canonically`,
+    );
   }
   if (build[0] !== "--build" || build[1] !== "$BUILD/cmake-build") {
     throw new TypeError(`${path}.buildArguments must use the canonical build placeholder`);
@@ -500,6 +809,37 @@ function absolutePath(value: unknown, path: string): string {
   return result;
 }
 
+function canonicalInstallPath(value: unknown, path: string): string {
+  const result = text(value, path);
+  if (result.includes("\\") || result.startsWith("/") || /^[A-Za-z]:/.test(result)) {
+    throw new TypeError(`${path} must be a canonical relative install path`);
+  }
+  const segments = result.split("/");
+  if (
+    segments.length < 2 || segments[0] !== "install" ||
+    segments.some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    throw new TypeError(`${path} must be below install without path traversal`);
+  }
+  return result;
+}
+
+function zlsBuildProfile(value: unknown, path: string): ZlsBuildProfile {
+  if (
+    value !== "debug" && value !== "release-safe" && value !== "release-fast" &&
+    value !== "release-small"
+  ) throw new TypeError(`${path} is invalid`);
+  return value;
+}
+
+function zlsOptimizeMode(value: unknown, path: string): ZlsOptimizeMode {
+  if (
+    value !== "Debug" && value !== "ReleaseSafe" && value !== "ReleaseFast" &&
+    value !== "ReleaseSmall"
+  ) throw new TypeError(`${path} is invalid`);
+  return value;
+}
+
 function objectId(value: unknown, path: string): string {
   const result = text(value, path);
   if (!COMMIT.test(result)) throw new TypeError(`${path} must be a lowercase object ID`);
@@ -554,14 +894,18 @@ function strictObject(
   path: string,
   keys: readonly string[],
 ): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError(`${path} must be an object`);
-  }
-  const result = value as Record<string, unknown>;
+  const result = looseObject(value, path);
   const unknown = Object.keys(result).filter((key) => !keys.includes(key)).sort();
   if (unknown.length > 0) throw new TypeError(`${path} contains unknown key '${unknown[0]}'`);
   for (const key of keys) if (!(key in result)) throw new TypeError(`${path}.${key} is required`);
   return result;
+}
+
+function looseObject(value: unknown, path: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${path} must be an object`);
+  }
+  return value as Record<string, unknown>;
 }
 
 function assertSortedUnique(values: readonly string[], path: string): void {
@@ -574,4 +918,15 @@ function assertSortedUnique(values: readonly string[], path: string): void {
 
 function equal(actual: unknown, expected: unknown, path: string): void {
   if (actual !== expected) throw new TypeError(`${path} must equal ${String(expected)}`);
+}
+
+function canonicalObject(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalObject).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${
+      Object.keys(record).sort().map((key) => `${key}:${canonicalObject(record[key])}`).join(",")
+    }}`;
+  }
+  return JSON.stringify(value);
 }

@@ -71,6 +71,10 @@ Deno.test("LLVM 21 adapter constructs explicit CMake commands across host path v
     ]);
     assert(commands[0].args.includes(`-DCMAKE_INSTALL_PREFIX=${paths.install}`));
     assert(commands[0].args.includes("-DZIG_USE_LLVM_CONFIG=ON"));
+    assertEquals(
+      commands[0].args.filter((argument) => argument.startsWith("-DZIG_EXTRA_BUILD_ARGS=")),
+      ["-DZIG_EXTRA_BUILD_ARGS=-Dno-langref"],
+    );
     assert(commands[0].args.includes("-DZIG_VERSION=0.16.0"));
     assertEquals(commands[1].args.slice(-2), ["--parallel", "12"]);
     assertStringIncludes(

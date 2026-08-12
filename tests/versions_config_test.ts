@@ -96,8 +96,11 @@ Deno.test("locked CMake contract selects the exact LLVM adapter and rejects gues
     abbreviatedCommit: COMMIT_B.slice(0, 9),
   });
   const llvm21 = parseCmakeZigSourceContract(cmakeSourceContract(21));
-  const declaredOnly = parseCmakeZigSourceContract(cmakeSourceContract(22));
-  const llvm22 = parseCmakeZigSourceContract(cmakeSourceContract(22), llvm22Evidence());
+  const llvm22Source = cmakeSourceContract(22, false);
+  const declaredOnly = parseCmakeZigSourceContract(llvm22Source);
+  const llvm22 = parseCmakeZigSourceContract(llvm22Source, llvm22Evidence());
+  assertEquals(llvm21.noLangrefSupport, "cmake-default");
+  assertEquals(llvm22.noLangrefSupport, "extra-build-args");
   assertEquals(releaseAdapterFor(version17, llvm21).id, "zig-cmake-llvm21-autodoc-v1");
   assertEquals(declaredOnly.llvmCompatibility, null);
   assertThrows(
@@ -111,7 +114,7 @@ Deno.test("locked CMake contract selects the exact LLVM adapter and rejects gues
   );
 
   const mismatched = parseCmakeZigSourceContract(
-    cmakeSourceContract(22).replace("find_package(clang 22)", "find_package(clang 21)"),
+    llvm22Source.replace("find_package(clang 22)", "find_package(clang 21)"),
     llvm22Evidence(),
   );
   const mismatchError = assertThrows(
@@ -122,12 +125,19 @@ Deno.test("locked CMake contract selects the exact LLVM adapter and rejects gues
   assertEquals(mismatchError.details.commit, COMMIT_A);
 
   const unknownLayout = parseCmakeZigSourceContract(
-    cmakeSourceContract(22).replace("install(SCRIPT cmake/install.cmake)\n", ""),
+    llvm22Source.replace("install(SCRIPT cmake/install.cmake)\n", ""),
     llvm22Evidence(),
   );
   assertEquals(unknownLayout.layout, null);
   assertThrows(
     () => releaseAdapterFor(version17, unknownLayout, COMMIT_A),
+    ZigReleaseUnsupportedError,
+  );
+
+  const unsafeLangref = parseCmakeZigSourceContract(cmakeSourceContract(21, false));
+  assertEquals(unsafeLangref.noLangrefSupport, null);
+  assertThrows(
+    () => releaseAdapterFor(version16, unsafeLangref, COMMIT_B),
     ZigReleaseUnsupportedError,
   );
 });
@@ -175,7 +185,7 @@ Deno.test("configuration loading rejects a managed root symlink escaping the pro
   }
 });
 
-function cmakeSourceContract(llvmMajor: number): string {
+function cmakeSourceContract(llvmMajor: number, cmakeDisablesLangref = true): string {
   return [
     "cmake_minimum_required(VERSION 3.15)",
     "set(ZIG_VERSION_MAJOR 0)",
@@ -186,6 +196,13 @@ function cmakeSourceContract(llvmMajor: number): string {
     `find_package(llvm ${llvmMajor})`,
     `find_package(clang ${llvmMajor})`,
     `find_package(lld ${llvmMajor})`,
+    "set(ZIG_BUILD_ARGS",
+    ...(cmakeDisablesLangref ? ["  -Dno-langref"] : []),
+    ")",
+    'set(ZIG_EXTRA_BUILD_ARGS "" CACHE STRING "Extra zig build args")',
+    "if(ZIG_EXTRA_BUILD_ARGS)",
+    "  list(APPEND ZIG_BUILD_ARGS ${ZIG_EXTRA_BUILD_ARGS})",
+    "endif()",
     "install(SCRIPT cmake/install.cmake)",
     "",
   ].join("\n");
@@ -193,6 +210,8 @@ function cmakeSourceContract(llvmMajor: number): string {
 
 function llvm22Evidence() {
   return {
+    buildZig:
+      'const skip_install_langref = b.option(bool, "no-langref", "skip copying of langref") orelse false;',
     zigLlvm: "opt_bisect.setIntervals({0, limit});",
     zigLlvmAr: '#include "llvm/ADT/StringMap.h"',
     clangDriver: '#include "clang/Options/Options.h"',

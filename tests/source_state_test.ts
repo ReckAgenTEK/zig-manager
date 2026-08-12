@@ -15,13 +15,16 @@ import {
   ScopeRegistryStore,
   serializeScopePin,
   ToolchainProfileStore,
+  ZigDependencyInUseError,
   ZigHostUnsupportedError,
   ZigInstallCorruptError,
   ZigInstallInUseError,
+  ZigInvalidArgumentError,
   ZigManager,
   ZigOperationAbortedError,
   ZigProfileNotFoundError,
   ZigScopeNotPinnedError,
+  ZlsCompatibilityNotFoundError,
 } from "../src/mod.ts";
 import { buildManagedZig, buildStagingRoot } from "../src/build.ts";
 import {
@@ -30,10 +33,14 @@ import {
   type GlobalOperationLockTarget,
 } from "../src/global_operation_lock.ts";
 import type { ZigManagerServices } from "../src/zig_manager.ts";
+import { GlobalProfileStore } from "../src/global_profile.ts";
+import { isPairedToolchainProfile } from "../src/profile_store.ts";
 import {
   cleanup,
   COMMIT_A,
   COMMIT_B,
+  COMMIT_D,
+  COMMIT_F,
   createDevelopmentFiles,
   FakeProcessRunner,
   FakeSourceRef,
@@ -81,6 +88,11 @@ Deno.test("default host gate rejects unsupported runtimes before manager mutatio
 Deno.test("use builds globally but publishes only a directory pin and no global current pointer", async () => {
   await withManager(async ({ manager, project, home, runner }) => {
     const result = await manager.use("0.16");
+    assertEquals(result.schemaVersion, 2);
+    assertEquals(result.selection, "local");
+    assertEquals(result.zig?.installationId, result.installationId);
+    assertEquals(result.zls?.selector, "0.16.2");
+    assertEquals(await manager.which("zls"), result.zls?.executable);
     assertEquals(result.scopeRoot, await Deno.realPath(project));
     assertEquals(
       await Deno.readTextFile(join(project, ".zig-manager", "toolchain")),
@@ -89,6 +101,31 @@ Deno.test("use builds globally but publishes only a directory pin and no global 
     assertEquals((await manager.current()).profileId, result.profileId);
     await assertRejects(() => Deno.lstat(join(home, "data", "current")), Deno.errors.NotFound);
     await assertRejects(() => Deno.lstat(join(home, "data", "zig")), Deno.errors.NotFound);
+    const profile = await new ToolchainProfileStore({
+      dataRoot: manager.paths.dataDir,
+      installs: new InstallStore({ dataRoot: manager.paths.dataDir }),
+    }).read(result.profileId);
+    assert(isPairedToolchainProfile(profile));
+    assertEquals(profile.schemaVersion, 2);
+    assertEquals(profile.components.zls, result.zls?.installationId);
+    const zlsManifest = JSON.parse(
+      await Deno.readTextFile(
+        join(
+          manager.paths.installsDir,
+          "zls",
+          result.zls!.installationId,
+          "install-manifest.json",
+        ),
+      ),
+    );
+    assertEquals(zlsManifest.dependencies, [{
+      component: "zig",
+      installationId: result.installationId,
+    }]);
+    assertEquals((await manager.list()).installations.map((item) => item.component), [
+      "zig",
+      "zls",
+    ]);
     const buildAndVerification = runner.requests.filter((request) =>
       request.args[0] === "-S" || request.args[0] === "--build" ||
       request.args[0] === "build-exe" || request.args[0] === "version" ||
@@ -102,6 +139,10 @@ Deno.test("use builds globally but publishes only a directory pin and no global 
 Deno.test("successful scope mutations reconcile the advisory registry", async () => {
   await withManager(async ({ manager, project, home }) => {
     const used = await manager.use("0.16");
+    const persistentZig = join(manager.paths.globalBinDir, "zig");
+    const persistentZls = join(manager.paths.globalBinDir, "zls");
+    assert((await Deno.lstat(persistentZig)).isFile);
+    assert((await Deno.lstat(persistentZls)).isFile);
     const registry = new ScopeRegistryStore(join(home, "state", "scopes.json"));
     assertEquals((await registry.read())?.scopes, [{
       scopeRoot: await Deno.realPath(project),
@@ -170,13 +211,215 @@ Deno.test("remote, build, and verification failures preserve prior pin bytes", a
   });
 });
 
+Deno.test("ZLS build failure preserves both pointers and leaves the completed Zig cached", async () => {
+  await withManager(async ({ manager, sourceRef, runner, project }) => {
+    const first = await manager.use("0.16");
+    const priorPin = await Deno.readFile(first.pinPath);
+    sourceRef.refs.push({ kind: "tag", name: "0.16.1", commit: COMMIT_B });
+    runner.zigVersion = "0.16.1";
+    runner.failZlsBuild = true;
+
+    await assertRejects(() => manager.use("0.16.1"), Error, "building ZLS");
+    assertEquals(await Deno.readFile(join(project, ".zig-manager", "toolchain")), priorPin);
+    assertEquals((await manager.current()).profileId, first.profileId);
+    const listed = await manager.list();
+    assertEquals(
+      listed.installations.filter((item) => item.component === "zig").map((item) => item.version)
+        .sort(),
+      ["0.16.1", "0.16.0"].sort(),
+    );
+    assertEquals(listed.installations.filter((item) => item.component === "zls").length, 1);
+    await assertRejects(
+      () => Deno.lstat(manager.paths.globalProfileFile),
+      Deno.errors.NotFound,
+    );
+  });
+});
+
+Deno.test("all development selectors require ZLS remote HEAD to declare the same cycle", async () => {
+  await withManager(async ({ manager, sourceRef, runner }) => {
+    sourceRef.refs.push({ kind: "branch", name: "development", commit: COMMIT_B });
+    sourceRef.versions.set(COMMIT_B, { base: "0.17.0", tag: "0.16.0", distance: 4 });
+    runner.zigVersion = `0.17.0-dev.4+${COMMIT_B.slice(0, 9)}`;
+    sourceRef.head = { branch: "master", commit: COMMIT_B };
+    sourceRef.refs = sourceRef.refs.map((ref) =>
+      ref.kind === "branch" && ref.name === "master" ? { ...ref, commit: COMMIT_B } : ref
+    );
+    sourceRef.zlsHead = { branch: "master", commit: COMMIT_D };
+    sourceRef.zlsRefs = sourceRef.zlsRefs.map((ref) =>
+      ref.kind === "branch" && ref.name === "master" ? { ...ref, commit: COMMIT_D } : ref
+    );
+
+    await assertRejects(
+      () => manager.use("latest"),
+      ZlsCompatibilityNotFoundError,
+      "development cycle 0.16, not 0.17",
+    );
+    await assertRejects(
+      () => manager.use("branch:development"),
+      ZlsCompatibilityNotFoundError,
+      "development cycle 0.16, not 0.17",
+    );
+    assertEquals(
+      (await manager.list()).installations.filter((item) => item.component === "zig").length,
+      1,
+    );
+
+    sourceRef.zlsHead = { branch: "master", commit: COMMIT_F };
+    sourceRef.zlsRefs = sourceRef.zlsRefs.map((ref) =>
+      ref.kind === "branch" && ref.name === "master" ? { ...ref, commit: COMMIT_F } : ref
+    );
+    const used = await manager.use("branch:development");
+    assertEquals(used.zls?.selector, "latest");
+    assertStringIncludes(used.zls?.version ?? "", "0.17.0-dev");
+  });
+});
+
+Deno.test("local selection overrides global, unuse reveals global, then external fallback wins", async () => {
+  await withManager(async ({
+    manager,
+    project,
+    nested,
+    other,
+    fallbackZig,
+    fallbackZls,
+    runner,
+  }) => {
+    const global = await manager.use("0.16", { global: true });
+    assertEquals(global.selection, "global");
+    assertEquals(global.scopeRoot, null);
+    assertEquals(global.pinPath, manager.paths.globalProfileFile);
+    assertEquals(
+      (await new GlobalProfileStore(manager.paths.globalProfileFile).read())?.profileId,
+      global.profileId,
+    );
+    assertEquals((await manager.current({ path: other })).selection, "global");
+    assertEquals(await manager.which("zls", { path: other }), global.zls?.executable);
+
+    runner.zigVersion = "0.16.1";
+    const local = await manager.use("latest", { path: project });
+    const localStatus = await manager.current({ path: nested });
+    const globalStatus = await manager.current({ global: true });
+    assertEquals(localStatus.selection, "local");
+    assertEquals(localStatus.profileId, local.profileId);
+    assertEquals(localStatus.zls?.installationId, local.zls?.installationId);
+    assertEquals(globalStatus.selection, "global");
+    assertEquals(globalStatus.profileId, global.profileId);
+    assertEquals(await manager.which("zig", { path: nested }), local.zig?.executable);
+    assertEquals(await manager.which("zls", { path: nested }), local.zls?.executable);
+
+    for (const selected of [global, local]) {
+      const manifest = JSON.parse(
+        await Deno.readTextFile(
+          join(
+            manager.paths.installsDir,
+            "zls",
+            selected.zls!.installationId,
+            "install-manifest.json",
+          ),
+        ),
+      );
+      assertEquals(manifest.dependencies[0].installationId, selected.installationId);
+    }
+
+    await manager.unuse({ path: project });
+    assertEquals((await manager.current({ path: nested })).profileId, global.profileId);
+    const removed = await manager.unuse({ global: true });
+    assertEquals(removed.selection, "global");
+    assertEquals((await manager.current({ path: other })).selection, "fallback");
+    assertEquals(await manager.which("zig", { path: other }), fallbackZig);
+    assertEquals(await manager.which("zls", { path: other }), fallbackZls);
+    assertEquals((await manager.run(["version"], { cwd: other })).code, 0);
+
+    await assertRejects(
+      () => manager.current({ global: true, path: other }),
+      ZigInvalidArgumentError,
+      "cannot be combined",
+    );
+    await assertRejects(
+      () => manager.use("0.16", { global: true, path: other }),
+      ZigInvalidArgumentError,
+      "cannot be combined",
+    );
+  });
+});
+
+Deno.test("broken global pointers error instead of falling through to external tools", async () => {
+  await withManager(async ({ manager, other, fallbackZig }) => {
+    const missing = "9".repeat(64);
+    await new GlobalProfileStore(manager.paths.globalProfileFile).write(missing);
+    await assertRejects(
+      () => manager.current({ path: other }),
+      ZigProfileNotFoundError,
+      missing,
+    );
+    assert(fallbackZig.length > 0);
+
+    await Deno.writeTextFile(manager.paths.globalProfileFile, "malformed global pointer\n");
+    await assertRejects(
+      () => manager.which("zig", { path: other }),
+      Error,
+      "global profile pointer",
+    );
+  });
+});
+
+Deno.test("global update publishes the complete moving pair last and global sync verifies it", async () => {
+  await withManager(async ({ manager, sourceRef, runner }) => {
+    sourceRef.head = { branch: "master", commit: COMMIT_A };
+    sourceRef.refs = sourceRef.refs.map((ref) =>
+      ref.kind === "branch" && ref.name === "master" ? { ...ref, commit: COMMIT_A } : ref
+    );
+    runner.zigVersion = "0.16.0";
+    const first = await manager.use("latest", { global: true });
+
+    sourceRef.head = { branch: "master", commit: COMMIT_B };
+    sourceRef.refs = sourceRef.refs.map((ref) =>
+      ref.kind === "branch" && ref.name === "master" ? { ...ref, commit: COMMIT_B } : ref
+    );
+    runner.zigVersion = "0.16.1";
+    const updated = await manager.update({ global: true });
+    assertEquals(updated.selection, "global");
+    assertEquals(updated.previousProfileId, first.profileId);
+    assertEquals(updated.changed, true);
+    assertEquals(
+      (await new GlobalProfileStore(manager.paths.globalProfileFile).read())?.profileId,
+      updated.profileId,
+    );
+    const dependency = JSON.parse(
+      await Deno.readTextFile(
+        join(
+          manager.paths.installsDir,
+          "zls",
+          updated.zls!.installationId,
+          "install-manifest.json",
+        ),
+      ),
+    ).dependencies[0];
+    assertEquals(dependency.installationId, updated.installationId);
+
+    sourceRef.calls.length = 0;
+    sourceRef.zlsCalls.length = 0;
+    const synced = await manager.sync({ global: true });
+    assertEquals(synced.selection, "global");
+    assertEquals(synced.profileId, updated.profileId);
+    assertEquals(synced.rebuilt, false);
+    assertEquals(sourceRef.calls, []);
+    assertEquals(sourceRef.zlsCalls, []);
+  });
+});
+
 Deno.test("useInstalled is local and makes no source-ref calls", async () => {
   await withManager(async ({ manager, sourceRef, other }) => {
     const installed = await manager.install("0.16");
     sourceRef.calls.length = 0;
+    sourceRef.zlsCalls.length = 0;
     const used = await manager.useInstalled(installed.installationId, { path: other });
     assertEquals(used.installationId, installed.installationId);
+    assertEquals(used.profileId, installed.profileId);
+    assertEquals(used.zls?.installationId, installed.zls?.installationId);
     assertEquals(sourceRef.calls, []);
+    assertEquals(sourceRef.zlsCalls, []);
     assertEquals((await manager.current({ path: other })).profileId, used.profileId);
   });
 });
@@ -238,6 +481,13 @@ Deno.test("uninstall requires explicit profile pruning and rebuilds the catalog"
     assert((await Deno.lstat(join(manager.paths.profilesDir, used.profileId))).isDirectory);
     const gc = await manager.gc({ profiles: true });
     assert(gc.removed.some((path) => path.endsWith(used.profileId)));
+    const dependency = await assertRejects(
+      () => manager.uninstall(installed.installationId),
+      ZigDependencyInUseError,
+      "required by retained ZLS",
+    );
+    assertEquals(dependency.details.dependentInstallationIds, [installed.zls!.installationId]);
+    await manager.uninstall(installed.zls!.installationId);
     const removed = await manager.uninstall(installed.installationId);
     assertEquals(removed.installationId, installed.installationId);
     assertEquals(removed.component, "zig");
@@ -352,6 +602,8 @@ Deno.test("gc removes only UUID staging absent from every retained lock owner", 
 Deno.test("repair reconciles one exact pin and purge reports but never removes it", async () => {
   await withManager(async ({ manager, project, home }) => {
     const used = await manager.use("0.16");
+    const persistentZig = join(manager.paths.globalBinDir, "zig");
+    const persistentZls = join(manager.paths.globalBinDir, "zls");
     await Deno.remove(join(home, "state", "scopes.json"));
     const repaired = await manager.repair({ path: project });
     assertEquals(repaired.scopeValid, true);
@@ -362,14 +614,44 @@ Deno.test("repair reconciles one exact pin and purge reports but never removes i
     assertEquals(dryRun.danglingPins.map((pin) => pin.pinPath), [used.pinPath]);
     assert((await Deno.lstat(used.pinPath)).isFile);
     assert((await Deno.lstat(join(home, "data"))).isDirectory);
+    assertEquals(dryRun.persistentResolvers, { zig: true, zls: true });
+    assert((await Deno.lstat(persistentZig)).isFile);
+    assert((await Deno.lstat(persistentZls)).isFile);
 
     const purged = await manager.purge({ confirm: true });
     assertEquals(purged.danglingPins.map((pin) => pin.pinPath), [used.pinPath]);
+    assertEquals(purged.persistentResolvers, { zig: true, zls: true });
     assert((await Deno.lstat(used.pinPath)).isFile);
+    await assertRejects(() => Deno.lstat(persistentZig), Deno.errors.NotFound);
+    await assertRejects(() => Deno.lstat(persistentZls), Deno.errors.NotFound);
     for (const root of ["config", "state", "data", "cache"]) {
       await assertRejects(() => Deno.lstat(join(home, root)), Deno.errors.NotFound);
     }
   });
+});
+
+Deno.test("repair uses one operation UUID and global-before-scope lock order", async () => {
+  let locks!: RecordingOperationLocks;
+  await withManager(
+    async ({ manager }) => {
+      const repaired = await manager.repair();
+      assertEquals(repaired.catalogRebuilt, true);
+      assertEquals([...new Set(locks.events.map((event) => event.operationId))].length, 1);
+      assertEquals(locks.events.map((event) => `${event.action}:${event.kind}`), [
+        "acquire:global",
+        "acquire:scope",
+        "acquire:catalog",
+        "release:catalog",
+        "release:scope",
+        "release:global",
+      ]);
+    },
+    undefined,
+    (paths) => {
+      locks = new RecordingOperationLocks(paths.stateDir);
+      return { locks };
+    },
+  );
 });
 
 Deno.test("latest integration uses literal symbolic remote HEAD", async () => {
@@ -379,8 +661,11 @@ Deno.test("latest integration uses literal symbolic remote HEAD", async () => {
     const used = await manager.use("latest");
     assertEquals(used.commit, COMMIT_B);
     assertEquals(used.selector, "latest");
+    assertEquals(used.zls?.selector, "latest");
     assertEquals(sourceRef.calls.filter((call) => call === "resolveRemoteHead").length, 1);
     assertEquals(sourceRef.calls.filter((call) => call === "listRemoteRefs").length, 0);
+    assertEquals(sourceRef.zlsCalls.filter((call) => call === "resolveRemoteHead").length, 1);
+    assertEquals(sourceRef.zlsCalls.filter((call) => call === "listRemoteRefs").length, 0);
   });
 });
 
@@ -390,10 +675,13 @@ Deno.test("sync validates the exact current profile without remote resolution", 
     const used = await manager.use("0.16");
     events.length = 0;
     sourceRef.calls.length = 0;
+    sourceRef.zlsCalls.length = 0;
     const synced = await manager.sync();
     assertEquals(synced.profileId, used.profileId);
     assertEquals(synced.rebuilt, false);
     assertEquals(sourceRef.calls, []);
+    assertEquals(sourceRef.zlsCalls, []);
+    assertEquals(synced.zls?.installationId, used.zls?.installationId);
     assertEquals(events, ["catalog"]);
   }, events);
 });
@@ -414,10 +702,12 @@ Deno.test("data installs survive source, build, and log cache deletion across lo
     assertEquals((await manager.sync({ path: project })).rebuilt, false);
     assertEquals(sourceRef.calls, []);
 
+    await delay(2);
     const alias = await manager.use("0.16.0", { path: other });
     assertEquals(alias.installationId, used.installationId);
     assertEquals(alias.reused, true);
     assertEquals(configureCount(), initialConfigureCount);
+    assertEquals((await manager.run(["version"], { cwd: other })).code, 0);
   });
 });
 
@@ -433,6 +723,34 @@ Deno.test("sync rebuilds a missing exact install without changing its pin", asyn
     assertEquals(synced.rebuilt, true);
     assertEquals(await Deno.readFile(join(project, ".zig-manager", "toolchain")), pin);
     assert((await Deno.stat(synced.executable)).isFile);
+  });
+});
+
+Deno.test("sync reconstructs the exact paired ZLS without changing the profile pointer", async () => {
+  await withManager(async ({ manager, sourceRef }) => {
+    const used = await manager.use("0.16");
+    const pin = await Deno.readFile(used.pinPath);
+    await Deno.remove(
+      join(manager.paths.installsDir, "zls", used.zls!.installationId),
+      { recursive: true },
+    );
+    sourceRef.calls.length = 0;
+    sourceRef.zlsCalls.length = 0;
+
+    const synced = await manager.sync();
+    assertEquals(synced.profileId, used.profileId);
+    assertEquals(synced.rebuilt, true);
+    assertEquals(synced.zig?.reused, true);
+    assertEquals(synced.zls?.reused, false);
+    assertEquals(synced.zls?.installationId, used.zls?.installationId);
+    assertEquals(await Deno.readFile(used.pinPath), pin);
+    assertEquals(sourceRef.calls, []);
+    assertEquals(
+      sourceRef.zlsCalls.filter((call) =>
+        call === "resolveRemoteHead" || call === "listRemoteRefs"
+      ),
+      [],
+    );
   });
 });
 
@@ -629,6 +947,10 @@ Deno.test("scope transaction uses one UUID and strict acquisition/release order"
         "acquire:install",
         "release:install",
         "release:source",
+        "acquire:source",
+        "acquire:install",
+        "release:install",
+        "release:source",
         "acquire:catalog",
         "release:catalog",
         "release:scope",
@@ -676,7 +998,7 @@ Deno.test("abort after catalog completion preserves exact prior pin bytes", asyn
       );
       assertEquals(controller.signal.reason, "catalog complete");
       assertEquals(await Deno.readFile(first.pinPath), prior);
-      assertEquals((await manager.list()).installations.length, 1);
+      assertEquals((await manager.list()).installations.length, 2);
       assertEquals((await manager.list()).profiles.length, 2);
       assertEquals(error.code, "ZIG_OPERATION_ABORTED");
     },
@@ -784,11 +1106,72 @@ Deno.test("update advances a moving selector and writes the winning scope only a
     assertEquals(updated.previousProfileId, first.profileId);
     assertEquals(updated.changed, true);
     assertEquals(updated.commit, COMMIT_B);
+    assert(updated.zls !== null);
+    const zlsManifest = JSON.parse(
+      await Deno.readTextFile(
+        join(
+          manager.paths.installsDir,
+          "zls",
+          updated.zls!.installationId,
+          "install-manifest.json",
+        ),
+      ),
+    );
+    assertEquals(zlsManifest.dependencies[0].installationId, updated.installationId);
     assertEquals((await manager.current()).profileId, updated.profileId);
     assertEquals(
       await Deno.readTextFile(join(project, ".zig-manager", "toolchain")),
       serializeScopePin(updated.profileId),
     );
+  });
+});
+
+Deno.test("update migrates a moving legacy raw-Zig profile to a schema-v2 pair", async () => {
+  await withManager(async ({ manager, runner }) => {
+    runner.zigVersion = "0.16.1";
+    runner.failZlsBuild = true;
+    await assertRejects(() => manager.install("latest"), Error, "building ZLS");
+    const zig = (await manager.list()).installations.find((item) => item.component === "zig")!;
+
+    const legacy = await manager.useInstalled(zig.installationId);
+    const profiles = new ToolchainProfileStore({
+      dataRoot: manager.paths.dataDir,
+      installs: new InstallStore({ dataRoot: manager.paths.dataDir }),
+    });
+    assertEquals((await profiles.read(legacy.profileId)).schemaVersion, 1);
+    assertEquals(legacy.zls, null);
+
+    runner.failZlsBuild = false;
+    const updated = await manager.update();
+    const migrated = await profiles.read(updated.profileId);
+    assert(isPairedToolchainProfile(migrated));
+    assertEquals(migrated.schemaVersion, 2);
+    assertEquals(updated.previousProfileId, legacy.profileId);
+    assertEquals(updated.changed, true);
+    assert(updated.zls !== null);
+  });
+});
+
+Deno.test("profile GC retains the global profile while pruning an unreferenced local profile", async () => {
+  await withManager(async ({ manager, project, runner }) => {
+    const global = await manager.use("0.16", { global: true });
+    runner.zigVersion = "0.16.1";
+    const local = await manager.use("latest", { path: project });
+    await manager.unuse({ path: project });
+
+    const collected = await manager.gc({ profiles: true });
+    assert(
+      collected.retained.some((reason) =>
+        reason.includes(global.profileId) && reason.includes("global profile pointer")
+      ),
+    );
+    assert(collected.removed.some((path) => path.endsWith(local.profileId)));
+    assert((await Deno.lstat(join(manager.paths.profilesDir, global.profileId))).isDirectory);
+    await assertRejects(
+      () => Deno.lstat(join(manager.paths.profilesDir, local.profileId)),
+      Deno.errors.NotFound,
+    );
+    assertEquals((await manager.current()).profileId, global.profileId);
   });
 });
 
@@ -842,6 +1225,7 @@ interface Fixture {
   readonly nested: string;
   readonly other: string;
   readonly fallbackZig: string;
+  readonly fallbackZls: string;
   readonly sourceRef: FakeSourceRef;
   readonly runner: FakeProcessRunner;
   readonly manager: ZigManager;
@@ -870,9 +1254,12 @@ async function withManager(
     await Deno.mkdir(other);
     const prefix = await createDevelopmentFiles(root);
     const fallbackZig = join(root, "fallback-bin", "zig");
+    const fallbackZls = join(root, "fallback-bin", "zls");
     await Deno.mkdir(dirname(fallbackZig), { recursive: true });
     await Deno.writeTextFile(fallbackZig, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await Deno.writeTextFile(fallbackZls, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     await Deno.chmod(fallbackZig, 0o755);
+    await Deno.chmod(fallbackZls, 0o755);
     const env = managerEnvironment(root, home, prefix, dirname(fallbackZig));
     const paths = new PlatformPaths({ env, home: root, platform: "linux" });
     const sourceRef = new FakeSourceRef(root, paths.sourcesDir);
@@ -894,7 +1281,18 @@ async function withManager(
       progress,
       services,
     });
-    await action({ root, home, project, nested, other, fallbackZig, sourceRef, runner, manager });
+    await action({
+      root,
+      home,
+      project,
+      nested,
+      other,
+      fallbackZig,
+      fallbackZls,
+      sourceRef,
+      runner,
+      manager,
+    });
   } finally {
     await cleanup(root);
   }
@@ -954,9 +1352,11 @@ function managerEnvironment(
   fallbackPath: string,
 ): Readonly<Record<string, string>> {
   const tool = (name: string) => join(root, "tools", name);
+  const denoInstallRoot = join(root, "deno-install");
   return {
     HOME: root,
-    PATH: fallbackPath,
+    PATH: `${join(denoInstallRoot, "bin")}:${fallbackPath}`,
+    DENO_INSTALL_ROOT: denoInstallRoot,
     ZIG_MANAGER_HOME: home,
     ZIG_MANAGER_CMAKE: tool("cmake"),
     ZIG_MANAGER_CC: tool("cc"),

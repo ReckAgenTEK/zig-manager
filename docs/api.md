@@ -2,8 +2,7 @@
 
 ## `ZigManager`
 
-`ZigManager` is the public facade for global immutable data and directory-scoped selection. Its
-constructor does not require `zig-manager.json`:
+`ZigManager` is the public facade for immutable paired installations and local/global selection:
 
 ```ts
 const manager = new ZigManager({
@@ -13,88 +12,96 @@ const manager = new ZigManager({
 });
 ```
 
-Supported injections are `env`, `home`, `platform`, `architecture`, `hostTarget`, `cwd`,
-`sourceRef`, `runner`, `diagnosticProbe`, `progress`, and component `services`. Defaults compose
-`PlatformPaths`, `GlobalConfigStore`, `GlobalOperationLockManager`, `SourceWorkspace`,
-`InstallStore`, `ToolchainProfileStore`, `GlobalCatalog`, `ScopeResolver`, `ScopePinStore`, and
-`SessionShimManager`.
+The constructor composes `PlatformPaths`, `GlobalConfigStore`, `GlobalOperationLockManager`, Zig and
+ZLS source workspaces, `InstallStore`, `ToolchainProfileStore`, `GlobalCatalog`,
+`GlobalProfileStore`, scope stores, and `SessionShimManager`. All process, source, build,
+verification, clock, progress, host, and store boundaries used by the facade are injectable for
+offline tests.
 
 ## Selection And Installation
 
-- `versions()` returns strict stable remote tags in descending numeric order.
-- `list({ remote? })` reports local installations/profiles and optionally stable remote tags.
-- `install(selector, options?)` builds or reuses an immutable Zig without creating a pin.
-- `uninstall(installationId, options?)` removes one unreferenced immutable installation. Retained
-  profiles and dependent installations block removal.
-- `use(selector, options?)` installs, creates/reuses a profile, updates the catalog, then writes the
-  selected directory pin last.
-- `useInstalled(id, options?)` validates and pins a local installation without source operations.
-- `unuse(options?)` removes only the pin exactly at the selected physical directory.
-- `sync(options?)` validates the exact pinned profile and attempts exact-source reconstruction only
-  when its stored metadata can reproduce the same installation identity.
-- `update(options?)` re-resolves the selector stored in the nearest profile. Exact tags and commits
-  are reported as immutable.
+- `versions()` returns strict stable Zig tags in descending numeric order.
+- `list({ remote? })` reports component-labelled installations, paired profiles, and optional Zig
+  remote tags.
+- `install(selector, options?)` builds or reuses Zig and compatible ZLS, then stores a schema-v2
+  paired profile without selecting it.
+- `use(selector, options?)` performs the paired install and atomically selects the profile locally
+  or with `{ global: true }`.
+- `useInstalled(id, options?)` selects an existing paired profile or installation without source
+  operations. Strict schema-v1 profiles remain readable.
+- `unuse(options?)`, `sync(options?)`, and `update(options?)` accept `{ path }` or
+  `{ global: true }`.
+- `uninstall(installationId)` removes one unreferenced component. A Zig installation cannot be
+  removed while an exact ZLS dependency or retained profile references it.
 
-Scope-changing transactions hold a physical-directory operation lock. Source-dependent work runs
-under the shared source-workspace lock; immutable publication uses a per-install lock; catalog
-updates use the catalog lock. Mutation callers wait abortably in strict
-`scope -> source -> install -> catalog` order. The first lease UUID identifies every later lock,
-staging path, scope temporary, and build log for that transaction. A scope pin is never written
-before all preceding work succeeds.
+`UseOptions.profile` configures the Zig CMake build. `jobs` is forwarded to both builds. ZLS uses
+its canonical release-safe profile unless a lower-level recipe API explicitly chooses another
+profile.
+
+Global mutations acquire the global lock; local mutations acquire the physical scope lock. Later
+work follows source, install, and catalog ordering under one operation UUID. A profile pointer is
+published only after both immutable installations, full verification, profile creation, catalog
+rebuild, and persistent resolver installation succeed.
 
 ## Resolution And Execution
 
-- `current(options?)` and `status(options?)` report managed or fallback mode. Plain reads are
-  offline; `{ check: true }` checks only moving selectors.
-- `which(tool?, options?)` returns the effective managed or fallback executable.
-- `run(args, options?)` runs the nearest pinned Zig, an explicit selector, or a local installation
-  ID directly through the injected process runner.
-- `shellActivate("bash")`, `shellDeactivate("bash")`, and `shellStatus()` expose session-only Bash
-  resolver behavior without editing startup files. Shell status schema v2 also reports the bounded
-  fallback `zig version` result and whether that fallback is usable.
+- `current()` and `status()` resolve local, then global, then external fallback. `{ global: true }`
+  ignores local pins. Managed schema-v2 results contain `zig`, `zls`, `selection`, and `profileId`;
+  top-level component fields are Zig compatibility aliases.
+- `which("zig" | "zls", options?)` returns the tool from the same winning profile.
+- `run(args, options?)` executes effective Zig directly. `{ global: true }` applies only when no
+  explicit selector or installation ID is supplied.
+- `shellActivate`, `shellDeactivate`, and `shellStatus` expose optional Bash session integration.
 
-A malformed or missing explicit pin/profile/install is an error. Managed resolution never silently
-falls through to an unrelated Zig inside a pinned tree.
+The generated POSIX resolver scripts execute no Deno or Git code. They strictly parse local and
+global two-line pointers, validate physical profile/executable paths under manager data, and execute
+the selected component. Invalid explicit state blocks fallback.
+
+`SessionShimManager.installPersistent()` writes owned `zig` and `zls` scripts to
+`PlatformPaths.globalBinDir`, derived from `DENO_INSTALL_ROOT` or `$HOME/.deno/bin`. It refuses to
+replace unrelated files. `removePersistent()` removes only files carrying the exact data-root
+ownership marker.
+
+## Profiles And Sources
+
+`ToolchainProfileV2` records exact Zig and ZLS installation IDs and complete source observations.
+`createToolchainProfileIdentity` and `computeProfileId` canonicalize both components. The public
+profile validators retain strict schema-v1 read compatibility but all new source selections are v2.
+
+`GlobalProfileStore` owns the manager-global pointer. Its protocol is exactly:
+
+```text
+zig-manager-global-v1
+profile=<64-lowercase-hex>
+```
+
+Reads and writes reject symlinks, unsafe parents, extra fields, malformed IDs, and non-physical
+paths. Publication is atomic.
+
+`ZlsSourceWorkspace` uses only public `@zignado/source-ref` APIs. Stable selection chooses the
+highest strict ZLS tag matching Zig's major/minor cycle. Development selection follows literal
+symbolic remote HEAD. Exact reconstruction never advances a stored commit.
+
+## Build And Verification
+
+`prepareZlsBuildRecipe` fingerprints the exact managed Zig dependency. `buildManagedZls` invokes
+that executable with direct arguments, isolated HOME/TMP/cache paths, and a cleared explicit
+environment. Recipe identity includes source, Zig dependency, profile, optimization, jobs, host,
+arguments, environment, and verifier contracts.
+
+`installBuiltZls`, `reuseInstalledZls`, and `verifyInstalledZls` enforce immutable layout, hashes,
+version, ELF/runtime metadata, exact dependency identity, and a bounded LSP initialize/shutdown
+exchange. There are no downloaded binaries, alternate build strategies, or host Zig fallback.
 
 ## Diagnostics And Cleanup
 
-- `doctor(selector?, options?)` returns schema-v2 structured findings with stable severity/code,
-  required/found values, checked paths, remediation, and verified package metadata. `buildReady`
-  means there are no errors; `ok` also rejects warnings only when `strict` is requested.
-- `doctor(undefined, { host: true })` is offline and limits itself to host, source-ref, resource,
-  session, and fallback checks. A selector resolves and checks one exact source/adapter without
-  configuring; no selector in a pin checks its stored exact source.
-- `doctor(undefined, { verify: true })` is pin-only and reports `full-install` verification. It
-  checks immutable hashes and layout, exact `zig version`/host target, ELF format, isolated minimal
-  compilation and execution, and recorded runtime dependencies.
-- `gc(options?)` removes abandoned build/install/profile staging only when its canonical operation
-  UUID is absent from every strictly validated retained lock owner. Malformed or unverifiable lock
-  and staging entries are retained. Explicit cache flags remove replaceable roots; final
-  installations are always retained.
-- `repair(options?)` regenerates shims/catalog metadata, validates the current scope, and can
-  explicitly remove a lock whose owner is proven dead.
-- `purge({ dryRun: true })` reports manager roots; `purge({ confirm: true })` removes those roots.
-  It never removes external directory pins, Deno, the `zm` launcher, or an external Zig.
+- `doctor` uses the effective local/global profile. `{ global: true }` inspects only the global
+  selection; `{ verify: true }` verifies both components.
+- `gc` conservatively retains profiles referenced by local pins or the global pointer.
+- `repair` reinstalls both resolver modes, rebuilds the catalog, repairs global pointer state, and
+  reconciles one exact local pin.
+- `purge` removes owned persistent resolvers and manager roots while preserving external pins and
+  executables.
 
-## Source And Build
-
-`SourceRefApi` includes `resolveRemoteHead`, `listRemoteRefs`, checkout/status/revision operations,
-and `doctor`. `latest` exclusively uses `resolveRemoteHead`; it never substitutes a stable tag or a
-hard-coded branch.
-
-The default source transaction derives an exact source version and adapter, runs the adapter-aware
-doctor, fingerprints the complete pre-configure recipe, and uses its canonical SHA-256 as both the
-build-cache key and immutable installation ID. `buildManagedZig` and `installBuiltZig` execute
-direct argument arrays with an explicit cleared environment; ambient compiler, linker, CMake, and
-package-discovery variables are not inherited.
-
-Configure/build command JSON and complete stdout/stderr streams are flushed under
-`<cache>/logs/<operation-id>/zig/<installation-id>/`. Failed and cancelled build logs are retained;
-only explicit `gc({ buildCache: true })` removes the log root.
-
-## Errors
-
-Manager failures extend `ZigManagerError` and expose a stable `code`, concise `message`, separate
-`remediation` where stable, and structured `details`. Store, lock, scope, shim, and `source-ref`
-errors also retain stable codes. The CLI converts known low-level install/profile codes to their
-public `ZIG_*` categories in JSON output.
+Known manager and ZLS source/build/verification failures expose stable codes and structured details.
+The CLI preserves those codes in JSON errors and never emits credential-bearing repository URLs.
