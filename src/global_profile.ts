@@ -3,9 +3,10 @@ import { dirname, isAbsolute, resolve } from "@std/path";
 export const GLOBAL_PROFILE_FILE_NAME = "global-profile";
 export const GLOBAL_PROFILE_FORMAT_HEADER = "zig-manager-global-v1";
 export const GLOBAL_PROFILE_ID_LENGTH = 64;
-export const GLOBAL_PROFILE_SIZE_WITHOUT_FINAL_NEWLINE =
+export const GLOBAL_PROFILE_SIZE_WITHOUT_FINAL_NEWLINE: number =
   `${GLOBAL_PROFILE_FORMAT_HEADER}\nprofile=${"0".repeat(GLOBAL_PROFILE_ID_LENGTH)}`.length;
-export const GLOBAL_PROFILE_SIZE_WITH_FINAL_NEWLINE = GLOBAL_PROFILE_SIZE_WITHOUT_FINAL_NEWLINE + 1;
+export const GLOBAL_PROFILE_SIZE_WITH_FINAL_NEWLINE: number =
+  GLOBAL_PROFILE_SIZE_WITHOUT_FINAL_NEWLINE + 1;
 
 const PROFILE_ID_PATTERN = /^[0-9a-f]{64}$/;
 
