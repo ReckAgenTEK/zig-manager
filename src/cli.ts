@@ -35,7 +35,6 @@ export interface CliIo {
 export interface CliExit extends ProcessStatus {}
 
 export interface CliManager {
-  versions(options?: { readonly signal?: AbortSignal }): ReturnType<ZigManager["versions"]>;
   list(options?: Parameters<ZigManager["list"]>[0]): ReturnType<ZigManager["list"]>;
   install(
     selector: string,
@@ -47,7 +46,7 @@ export interface CliManager {
   ): Promise<ZigUninstallResult>;
   use(selector: string, options?: Parameters<ZigManager["use"]>[1]): Promise<ZigUseResult>;
   useInstalled(
-    installationId: string,
+    profileOrZigInstallationId: string,
     options?: Parameters<ZigManager["useInstalled"]>[1],
   ): Promise<ZigUseResult>;
   unuse(options?: Parameters<ZigManager["unuse"]>[0]): Promise<ZigUnuseResult>;
@@ -150,7 +149,7 @@ export async function runCliDetailed(
         if (installed !== undefined) {
           if (values.positionals.length !== 0 || hasBuildOptions(values)) {
             throw new ZigInvalidArgumentError(
-              "use --installed accepts only an installation or profile ID and one scope option",
+              "use --installed accepts only a profile ID or Zig installation ID and one scope option",
             );
           }
           result = await manager.useInstalled(installed, scope);
@@ -943,7 +942,7 @@ Usage:
   zm shell status [-g|--global|--path <directory>] [--json]
   zm install <selector> [--profile <profile>] [--jobs <count>] [--json]
   zm use <selector> [-g|--global|--path <directory>] [build options] [--json]
-  zm use --installed <installation-or-profile-id> [-g|--global|--path <directory>] [--json]
+  zm use --installed <profile-or-zig-installation-id> [-g|--global|--path <directory>] [--json]
   zm unuse [-g|--global|--path <directory>] [--json]
   zm sync [-g|--global|--path <directory>] [build options] [--json]
   zm update [-g|--global|--path <directory>] [build options] [--json]
@@ -951,7 +950,7 @@ Usage:
   zm current|status [-g|--global|--path <directory>] [--check] [--json]
   zm which [zig|zls] [-g|--global|--path <directory>] [--json]
   zm run [-g|--global|--path <directory>] -- <zig arguments>
-  zm run <selector-or-installation-id> -- <zig arguments>
+  zm run <selector-or-zig-installation-id> -- <zig arguments>
   zm doctor [selector] [-g|--global|--path <directory>] [--host] [--verify] [--strict] [--json]
   zm uninstall <installation-id> [--json]
   zm gc [--dry-run] [--sources] [--build-cache] [--profiles] [--json]

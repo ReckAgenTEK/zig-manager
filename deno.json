@@ -30,7 +30,8 @@
     "lint": "deno lint",
     "typecheck": "deno check src/mod.ts src/cli.ts",
     "test": "deno test --allow-env --allow-read --allow-write --allow-run tests",
-    "test:e2e:arch": "ZIG_MANAGER_E2E=1 deno test --allow-env --allow-read --allow-write --allow-run --filter 'opt-in real Arch paired' tests/e2e_opt_in_test.ts",
+    "test:e2e:arch": "ZIG_MANAGER_E2E=1 deno test --allow-env --allow-read --allow-write --allow-run --filter 'opt-in real Arch paired release' tests/e2e_opt_in_test.ts",
+    "test:e2e:browser": "ZIG_MANAGER_BROWSER_E2E=1 deno test --allow-env --allow-read --allow-write --allow-run --allow-net=127.0.0.1 --filter 'opt-in real CDP browser integration' tests/e2e_opt_in_test.ts",
     "zm": "deno run --allow-env --allow-read --allow-write --allow-run --allow-sys src/cli.ts",
     "check": "deno task fmt:check && deno task lint && deno task typecheck && deno task test"
   },
@@ -40,6 +41,7 @@
       "schema",
       "docs",
       "README.md",
+      "CHANGELOG.md",
       "LICENSE"
     ]
   }

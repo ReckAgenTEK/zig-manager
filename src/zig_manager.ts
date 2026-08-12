@@ -611,43 +611,46 @@ export class ZigManager {
   }
 
   async useInstalled(
-    installationIdValue: string,
+    profileOrZigInstallationIdValue: string,
     options: ScopeOperationOptions = {},
   ): Promise<ZigUseResult> {
-    throwIfAborted(options.signal, `use installed Zig ${installationIdValue}`);
+    throwIfAborted(
+      options.signal,
+      `use installed profile or Zig ${profileOrZigInstallationIdValue}`,
+    );
     await this.#assertHost();
     this.#assertScopeOptions(options);
-    const installationId = validateInstallationId(installationIdValue);
+    const profileOrZigInstallationId = validateInstallationId(profileOrZigInstallationIdValue);
     const global = options.global === true;
     const scopeRoot = global ? null : await this.#scopeRoot(options.path);
     const lease = global
       ? await this.#acquireGlobal(
-        `use installed ${installationId}`,
-        installationId,
+        `use installed ${profileOrZigInstallationId}`,
+        profileOrZigInstallationId,
         options.signal,
       )
       : await this.#acquireScope(
         scopeRoot!,
-        `use installed ${installationId}`,
-        installationId,
+        `use installed ${profileOrZigInstallationId}`,
+        profileOrZigInstallationId,
         options.signal,
       );
     try {
       const operationId = lease.owner.operationId;
-      const paired = await this.#findPairedProfile(installationId);
+      const paired = await this.#findPairedProfile(profileOrZigInstallationId);
       if (paired !== null) {
         await this.#fullyVerifyProfile(paired, options.signal, operationId);
         const published = global
           ? await this.#publishExistingGlobalProfile(
             paired.profile.profileId,
-            `use installed ${installationId}`,
+            `use installed ${profileOrZigInstallationId}`,
             operationId,
             options.signal,
           )
           : await this.#publishExistingScopePin(
             scopeRoot!,
             paired.profile.profileId,
-            `use installed ${installationId}`,
+            `use installed ${profileOrZigInstallationId}`,
             operationId,
             options.signal,
           );
@@ -662,7 +665,7 @@ export class ZigManager {
         );
       }
 
-      const installed = await this.#getInstall(installationId);
+      const installed = await this.#getInstall(profileOrZigInstallationId);
       this.#assertInstallHost(installed);
       await this.#fullyVerifyInstall(
         installed,
@@ -679,14 +682,14 @@ export class ZigManager {
       const { profile, pinPath } = global
         ? await this.#publishLegacyGlobalSelection(
           selection,
-          `use installed ${installationId}`,
+          `use installed ${profileOrZigInstallationId}`,
           operationId,
           options.signal,
         )
         : await this.#publishLegacyScopeSelection(
           scopeRoot!,
           selection,
-          `use installed ${installationId}`,
+          `use installed ${profileOrZigInstallationId}`,
           operationId,
           options.signal,
         );

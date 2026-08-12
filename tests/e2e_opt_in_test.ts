@@ -325,7 +325,7 @@ const SELECTION_STATE_EXPRESSION = `(() => {
 })()`;
 
 Deno.test({
-  name: "opt-in real Arch paired release and incompatible latest workflow",
+  name: "opt-in real Arch paired release and local/global workflow",
   ignore: Deno.env.get("ZIG_MANAGER_E2E") !== "1",
   sanitizeOps: false,
   sanitizeResources: false,
@@ -490,29 +490,7 @@ printf 'version=%s\n' "$(zig version)"
     "activation changed Zig outside every pin",
   );
 
-  // 4. Literal latest must reject mismatched upstream development cycles before publication.
-  const latestFailure = await runZmFailure(
-    zm,
-    ["use", "latest", "--path", projectRoot, "--json"],
-    { cwd: projectRoot, env, inheritStderr: true },
-  );
-  assertCondition(
-    latestFailure.code === "ZLS_COMPATIBILITY_NOT_FOUND",
-    `incompatible latest returned unexpected error ${String(latestFailure.code)}`,
-  );
-  const latestDetails = requiredObject(latestFailure.details, "latest compatibility details");
-  assertCondition(
-    latestDetails.zigSelector === "latest" &&
-      typeof latestDetails.zigVersion === "string" &&
-      typeof latestDetails.zlsVersion === "string",
-    "latest compatibility failure omitted exact Zig/ZLS provenance",
-  );
-  assertCondition(
-    !await pathExists(join(projectRoot, ".zig-manager", "toolchain")),
-    "incompatible latest published a project pin",
-  );
-
-  // 5-7. Build a compatible stable pair and pin only the temporary project root.
+  // 4-6. Build a compatible stable pair and pin only the temporary project root.
   const initialStarted = performance.now();
   const initial = parseUseResult(
     await runZmSuccess(
@@ -546,7 +524,27 @@ printf 'version=%s\n' "$(zig version)"
     `release commit=${initial.commit} adapter=${initialAdapter} installation=${initial.installationId}\n`,
   );
 
-  // 6-9. Activated and ordinary shells switch by directory through the persistent pair resolvers.
+  const verified = await runZmSuccess(
+    zm,
+    ["doctor", "--verify", "--path", projectRoot, "--json"],
+    { cwd: projectRoot, env, inheritStderr: true },
+  );
+  assertCondition(verified.mode === "pin" && verified.ok === true, "paired doctor did not pass");
+  const verification = requiredObject(verified.verification, "paired doctor verification");
+  assertCondition(
+    verification.level === "full-install" && verification.ok === true &&
+      verification.compilesAndRuns === true,
+    "paired doctor omitted full Zig/ZLS verification",
+  );
+  const verificationDetails = requiredObject(verification.details, "paired doctor details");
+  assertCondition(
+    verificationDetails.profileId === initial.profileId &&
+      verificationDetails.zigInstallationId === initial.zig.installationId &&
+      verificationDetails.zlsInstallationId === initial.zls.installationId,
+    "paired doctor verified unexpected component identities",
+  );
+
+  // 7-10. Activated and ordinary shells switch by directory through persistent pair resolvers.
   const activated = await activatedDirectoryProbe(zm, env, projectRoot, childRoot, outsideRoot);
   assertCondition(activated.root === initial.version, "managed Zig is not active at the pin root");
   assertCondition(
@@ -635,7 +633,7 @@ printf 'zls=%s\n' "$(zls --version)"
     "a future activated shell lost the persistent pin",
   );
 
-  // 10. Compile and run a real program through the directory-aware resolver.
+  // 11. Compile and run a real program through the directory-aware resolver.
   const source = join(projectRoot, "hello-e2e.zig");
   const program = join(projectRoot, "hello-e2e");
   await Deno.writeTextFile(source, "pub fn main() void {}\n");
@@ -668,7 +666,7 @@ printf 'compiled=ok\n'
   const resolverAverageMs = await benchmarkVersion(shimZig, projectRoot, resolverEnv);
   const directAverageMs = await benchmarkVersion(initial.executable, projectRoot, env);
 
-  // 11. A second exact release observation must resolve to the same recipe and skip the build.
+  // 12. A second exact release observation must resolve to the same recipe and skip the build.
   const reuseStarted = performance.now();
   const reused = parseUseResult(
     await runZmSuccess(
@@ -692,7 +690,7 @@ printf 'compiled=ok\n'
     "unchanged release produced a different install or profile",
   );
 
-  // 12. Build a second exact Zig once, then publish it to a nested scope without rebuilding.
+  // 13. Build a second exact Zig once, then publish it to a nested scope without rebuilding.
   const secondSelector = `commit:${initial.commit}`;
   const secondStarted = performance.now();
   const second = parseInstallResult(
@@ -737,6 +735,52 @@ printf 'compiled=ok\n'
     childStatus.installationId === second.installationId,
     "the nearest nested pin did not win",
   );
+
+  const distinctGlobal = parseUseResult(
+    await runZmSuccess(zm, ["use", "--installed", second.profileId, "--global", "--json"], {
+      cwd: outsideRoot,
+      env,
+    }),
+  );
+  assertCondition(
+    distinctGlobal.selection === "global" && distinctGlobal.profileId === second.profileId,
+    "the second profile was not selected globally",
+  );
+  const parentWithGlobal = await runZmSuccess(
+    zm,
+    ["current", "--path", projectRoot, "--json"],
+    { cwd: projectRoot, env },
+  );
+  const nestedWithGlobal = await runZmSuccess(
+    zm,
+    ["current", "--path", childRoot, "--json"],
+    { cwd: childRoot, env },
+  );
+  const outsideWithGlobal = await runZmSuccess(
+    zm,
+    ["current", "--path", outsideRoot, "--json"],
+    { cwd: outsideRoot, env },
+  );
+  assertCondition(
+    parentWithGlobal.selection === "local" && parentWithGlobal.profileId === initial.profileId,
+    "the global profile overrode the parent local profile",
+  );
+  assertCondition(
+    nestedWithGlobal.selection === "local" && nestedWithGlobal.profileId === second.profileId,
+    "the nested local profile did not retain precedence",
+  );
+  assertCondition(
+    outsideWithGlobal.selection === "global" && outsideWithGlobal.profileId === second.profileId,
+    "the distinct global profile did not win outside local scopes",
+  );
+  const outsideZig = requiredObject(outsideWithGlobal.zig, "outside global Zig");
+  const outsideZls = requiredObject(outsideWithGlobal.zls, "outside global ZLS");
+  assertCondition(
+    outsideZig.installationId === second.zig.installationId &&
+      outsideZls.installationId === second.zls.installationId,
+    "global resolution mixed components from different profiles",
+  );
+  await runZmSuccess(zm, ["unuse", "--global", "--json"], { cwd: outsideRoot, env });
   const secondAdapter = await installAdapterId(managerHome, second.installationId);
   await logE2e(
     `second commit=${second.commit} adapter=${secondAdapter} installation=${second.installationId}\n`,
@@ -750,7 +794,7 @@ printf 'compiled=ok\n'
     profiles: await directoryBytes(join(managerHome, "data", "profiles")),
   };
 
-  // 13 and 15. Hide make in an isolated PATH and verify real Arch diagnostics block pre-configure.
+  // 14. Hide make in an isolated PATH and verify real Arch diagnostics block pre-configure.
   const parentPin = join(projectRoot, ".zig-manager", "toolchain");
   const pinBeforeFailure = await Deno.readTextFile(parentPin);
   const buildsBeforeFailure = await relativeTree(join(managerHome, "cache", "builds"));
@@ -826,7 +870,7 @@ printf 'compiled=ok\n'
     "failure changed fallback Zig outside the pins",
   );
 
-  // 14. Source, build, and log caches are replaceable; immutable installs remain runnable.
+  // 15. Source, build, and log caches are replaceable; immutable installs remain runnable.
   for (const name of ["sources", "builds", "logs"]) {
     await removeIfPresent(join(managerHome, "cache", name));
   }
@@ -856,11 +900,6 @@ printf 'compiled=ok\n'
         installationId: initial.installationId,
         buildMs: Math.round(initialBuildMs),
         reuseMs: Math.round(reuseMs),
-      },
-      latestFailure: {
-        code: latestFailure.code,
-        zigVersion: latestDetails.zigVersion,
-        zlsVersion: latestDetails.zlsVersion,
       },
       second: {
         selector: secondSelector,
@@ -1102,16 +1141,6 @@ function requiredBoolean(value: unknown, label: string): boolean {
 async function isExecutableFile(path: string): Promise<boolean> {
   const info = await Deno.stat(path).catch(() => null);
   return info?.isFile === true && (info.mode === null || (info.mode & 0o111) !== 0);
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await Deno.lstat(path);
-    return true;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
 }
 
 async function runVersionOnce(

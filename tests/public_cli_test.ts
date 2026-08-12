@@ -432,7 +432,9 @@ Deno.test("package metadata publishes the inert CLI entrypoint and documents non
   assertStringIncludes(deno.tasks.zm, "src/cli.ts");
   assertEquals(deno.publish.include.includes("schema"), true);
   assertEquals(deno.publish.include.includes("docs"), true);
+  assertEquals(deno.publish.include.includes("CHANGELOG.md"), true);
   assertStringIncludes(deno.tasks["test:e2e:arch"], "ZIG_MANAGER_E2E=1");
+  assertStringIncludes(deno.tasks["test:e2e:browser"], "ZIG_MANAGER_BROWSER_E2E=1");
 
   const readme = await Deno.readTextFile(new URL("../README.md", import.meta.url));
   assertStringIncludes(readme, "deno install --global --name zm");
@@ -440,6 +442,9 @@ Deno.test("package metadata publishes the inert CLI entrypoint and documents non
   assertStringIncludes(readme, "deno install --global --force --name zm");
   assertStringIncludes(readme, "deno uninstall --global zm");
   assertEquals(readme.includes("--compile"), false);
+
+  const changelog = await Deno.readTextFile(new URL("../CHANGELOG.md", import.meta.url));
+  assertStringIncludes(changelog, `## [${deno.version}]`);
 });
 
 class FakeCliManager implements CliManager {
@@ -447,10 +452,6 @@ class FakeCliManager implements CliManager {
   runStatus: ProcessResult = result(0, null);
   doctorFindings: DiagnosticFinding[] = [];
   installError: Error | null = null;
-
-  versions() {
-    return Promise.resolve([]);
-  }
 
   list() {
     return Promise.resolve({

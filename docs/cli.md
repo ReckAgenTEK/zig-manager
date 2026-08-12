@@ -10,7 +10,7 @@ zm shell status [-g|--global|--path <directory>]
 zm install <selector> [--profile <profile>] [--jobs <count>]
 zm uninstall <installation-id>
 zm use <selector> [-g|--global|--path <directory>] [build options]
-zm use --installed <installation-or-profile-id> [-g|--global|--path <directory>]
+zm use --installed <profile-or-zig-installation-id> [-g|--global|--path <directory>]
 zm unuse [-g|--global|--path <directory>]
 zm sync [-g|--global|--path <directory>] [build options]
 zm update [-g|--global|--path <directory>] [build options]
@@ -20,7 +20,7 @@ zm current [-g|--global|--path <directory>] [--check]
 zm status [-g|--global|--path <directory>] [--check]
 zm which [zig|zls] [-g|--global|--path <directory>]
 zm run [-g|--global|--path <directory>] -- <zig arguments>
-zm run <selector-or-installation-id> -- <zig arguments>
+zm run <selector-or-zig-installation-id> -- <zig arguments>
 
 zm doctor [selector] [-g|--global|--path <directory>] [--host] [--verify] [--strict]
 zm gc [--dry-run] [--sources] [--build-cache] [--profiles]
@@ -43,8 +43,9 @@ The exact managed Zig then builds and verifies ZLS. Any failure occurs before po
 
 `install` creates or reuses both immutable installations and their profile without selecting it.
 `use` performs the same work and publishes the local or global pointer last. `use --installed`
-accepts a paired profile ID or an installation ID; selecting an old Zig-only installation preserves
-its strict legacy profile rather than borrowing an unrelated ZLS.
+accepts a paired profile ID or a Zig installation ID; selecting an old Zig-only installation
+preserves its strict legacy profile rather than borrowing an unrelated ZLS. A ZLS installation ID
+cannot define a selection by itself.
 
 `sync` reproduces and verifies the exact stored sources. `update` re-resolves only a moving
 selector; an exact tag or commit remains immutable. Human and JSON output identify both components.
@@ -75,8 +76,9 @@ Deactivation removes only that entry. Neither command edits shell startup files.
 exported function named `zig` or `zls` can still take precedence over `PATH`.
 
 `run` executes Zig directly and passes through child stdout, stderr, exit code, and signal. With no
-selector it follows normal local/global/fallback resolution. An explicit selector or installation ID
-is independent of profile selection and therefore cannot be combined with `--global` or `--path`.
+selector it follows normal local/global/fallback resolution. An explicit selector or Zig
+installation ID is independent of profile selection and therefore cannot be combined with `--global`
+or `--path`.
 
 ## Output And Diagnostics
 

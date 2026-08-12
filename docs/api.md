@@ -27,8 +27,9 @@ offline tests.
   paired profile without selecting it.
 - `use(selector, options?)` performs the paired install and atomically selects the profile locally
   or with `{ global: true }`.
-- `useInstalled(id, options?)` selects an existing paired profile or installation without source
-  operations. Strict schema-v1 profiles remain readable.
+- `useInstalled(id, options?)` selects an existing paired profile or Zig installation without source
+  operations. A ZLS installation ID cannot define a selection. Strict schema-v1 profiles remain
+  readable.
 - `unuse(options?)`, `sync(options?)`, and `update(options?)` accept `{ path }` or
   `{ global: true }`.
 - `uninstall(installationId)` removes one unreferenced component. A Zig installation cannot be
@@ -50,7 +51,7 @@ rebuild, and persistent resolver installation succeed.
   top-level component fields are Zig compatibility aliases.
 - `which("zig" | "zls", options?)` returns the tool from the same winning profile.
 - `run(args, options?)` executes effective Zig directly. `{ global: true }` applies only when no
-  explicit selector or installation ID is supplied.
+  explicit selector or Zig installation ID is supplied.
 - `shellActivate`, `shellDeactivate`, and `shellStatus` expose optional Bash session integration.
 
 The generated POSIX resolver scripts execute no Deno or Git code. They strictly parse local and
