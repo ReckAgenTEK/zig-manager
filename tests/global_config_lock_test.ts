@@ -19,6 +19,7 @@ import {
 import {
   computeScopeOperationLockKey,
   GLOBAL_OPERATION_LOCK_OWNER_FILE,
+  GlobalOperationLock,
   GlobalOperationLockAbortedError,
   GlobalOperationLockBusyError,
   GlobalOperationLockManager,
@@ -354,6 +355,48 @@ Deno.test("same-install contention waits within a bound and then acquires for ca
       UUID_B,
     );
     await second.release();
+  });
+});
+
+Deno.test("waiting acquisition retries when a released lock disappears during inspection", async () => {
+  await withTempRoot(async (root) => {
+    const stateRoot = join(root, "state");
+    const manager = lockManager(stateRoot, { isPidAlive: () => false });
+    const first = await manager.acquireSource({
+      operation: "source owner",
+      operationId: UUID_A,
+    });
+    const tombstone = join(stateRoot, "locks", ".source.lock.release-race");
+    const originalRealPath = Deno.realPath;
+    let lockRealPaths = 0;
+    let second: GlobalOperationLock | null = null;
+    Object.defineProperty(Deno, "realPath", {
+      configurable: true,
+      writable: true,
+      value: async (path: string | URL) => {
+        if (path === first.path && ++lockRealPaths === 2) {
+          await Deno.rename(first.path, tombstone);
+        }
+        return await originalRealPath(path);
+      },
+    });
+    try {
+      second = await manager.acquireSource({
+        operation: "source waiter",
+        operationId: UUID_B,
+        wait: { timeoutMs: 1000, pollIntervalMs: 1 },
+      });
+      assert(second.contended);
+      assertEquals(second.owner.operationId, UUID_B);
+      assertEquals(lockRealPaths, 2);
+    } finally {
+      Object.defineProperty(Deno, "realPath", {
+        configurable: true,
+        writable: true,
+        value: originalRealPath,
+      });
+      if (second !== null) await second.release();
+    }
   });
 });
 

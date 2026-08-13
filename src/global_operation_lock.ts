@@ -508,7 +508,7 @@ export class GlobalOperationLockManager {
     if (!created) {
       const info = await lstatIfPresent(lockPath);
       if (info === null) return false;
-      await assertPhysicalDirectory(lockPath, info, "lock path");
+      if (!await assertPhysicalDirectoryIfPresent(lockPath, info, "lock path")) return false;
       return false;
     }
 
@@ -564,7 +564,7 @@ export class GlobalOperationLockManager {
 
     const lockInfo = await lstatIfPresent(lockPath);
     if (lockInfo === null) return null;
-    await assertPhysicalDirectory(lockPath, lockInfo, "lock path");
+    if (!await assertPhysicalDirectoryIfPresent(lockPath, lockInfo, "lock path")) return null;
     assertContained(this.locksRoot, lockPath, "lock path");
 
     const ownerPath = containedChild(lockPath, GLOBAL_OPERATION_LOCK_OWNER_FILE);
@@ -874,6 +874,23 @@ async function assertPhysicalDirectory(
   }
   if (physical !== resolve(path)) {
     throw new GlobalOperationLockValidationError(path, `${label} traverses a symbolic link`);
+  }
+}
+
+async function assertPhysicalDirectoryIfPresent(
+  path: string,
+  info: Deno.FileInfo,
+  label: string,
+): Promise<boolean> {
+  try {
+    await assertPhysicalDirectory(path, info, label);
+    return true;
+  } catch (cause) {
+    if (
+      cause instanceof GlobalOperationLockValidationError &&
+      cause.cause instanceof Deno.errors.NotFound
+    ) return false;
+    throw cause;
   }
 }
 
