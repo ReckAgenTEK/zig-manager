@@ -21,7 +21,7 @@ remain readable, but they never borrow an unrelated ZLS.
 ```bash
 deno install --global --name zm \
   --allow-env --allow-read --allow-write --allow-run --allow-sys \
-  jsr:@zignado/zig-manager@0.1.0-beta.2/cli
+  jsr:@zignado/zig-manager@0.1.0-beta.3/cli
 ```
 
 Check the host without resolving a source:

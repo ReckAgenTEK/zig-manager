@@ -337,6 +337,7 @@ export async function verifyInstalledZig(input: {
     const envResult = await input.runner.run({
       executable: executablePath,
       args: ["env"],
+      cwd: installPath,
       clearEnv: true,
       env: environment,
       signal: input.signal,
@@ -346,10 +347,7 @@ export async function verifyInstalledZig(input: {
     assertSuccessfulResult(envResult, "'zig env'", executablePath);
     assertBoundedResult(envResult, MAX_ENV_OUTPUT_BYTES, "zig env");
     const reportedLib = parseZigEnvLibDir(envResult.stdout);
-    if (!isAbsolute(reportedLib)) {
-      verificationFailure("'zig env' reported a non-absolute lib_dir", { reportedLib });
-    }
-    const libDir = resolve(reportedLib);
+    const libDir = resolve(installPath, reportedLib);
     assertPathContained(installPath, libDir);
     if (libDir !== expectedLibPath) {
       verificationFailure("compiler lib_dir does not match the managed library path", {

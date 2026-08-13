@@ -4,6 +4,13 @@ Notable changes to `@zignado/zig-manager` are recorded here.
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-08-13
+
+### Fixed
+
+- Accept Zig 0.17's CWD-relative `lib_dir` during managed installation verification while retaining
+  containment and exact-path validation.
+
 ## [0.1.0-beta.2] - 2026-08-12
 
 ### Added

@@ -6,14 +6,14 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { dirname, join } from "@std/path";
+import { dirname, join, relative } from "@std/path";
 import {
   canonicalInstallArtifactPath,
   createBuiltZigInstallIdentity,
   installBuiltZig,
   parseZigEnvTarget,
 } from "../src/install_pipeline.ts";
-import { ZigBinaryVerificationError } from "../src/errors.ts";
+import { ZigBinaryVerificationError, ZigPathOutsideRootError } from "../src/errors.ts";
 import { fileMetadata, pathExists } from "../src/filesystem.ts";
 import {
   computeInstallationId,
@@ -371,6 +371,42 @@ Deno.test("staged and promoted verification follows relocation and parses JSON/Z
   });
 });
 
+Deno.test("staged and promoted verification accepts Zig 0.17 cwd-relative lib_dir", async () => {
+  await withFixture(async ({ manifest, source, adapter }) => {
+    const store = new InstallStore(join(dirname(manifest.paths.root), "relative-data"));
+    const runner = new RelocatingZigRunner(store.dataRoot);
+    runner.relativeLibDir = true;
+    const result = await installBuiltZig(pipelineInput(store, runner, manifest, source, adapter));
+    assert(result.stagedVerification !== null);
+    assertStringIncludes(result.stagedVerification.libDir, join("installs", ".staging"));
+    assertEquals(result.promotedVerification.libDir, join(result.root, "install", "lib", "zig"));
+
+    const installedEnvRequests = runner.requests.filter((request) =>
+      request.args[0] === "env" && request.executable.startsWith(store.installsRoot)
+    );
+    assertEquals(installedEnvRequests.length, 2);
+    for (const request of installedEnvRequests) {
+      assertEquals(request.cwd, dirname(dirname(request.executable)));
+    }
+  });
+});
+
+Deno.test("cwd-relative lib_dir cannot escape the managed install", async () => {
+  await withFixture(async ({ manifest, source, adapter }) => {
+    const store = new InstallStore(join(dirname(manifest.paths.root), "relative-escape-data"));
+    const runner = new RelocatingZigRunner(store.dataRoot);
+    runner.relativeLibDir = true;
+    runner.outsideLibPhase = "staging";
+    await assertRejects(
+      () => installBuiltZig(pipelineInput(store, runner, manifest, source, adapter)),
+      ZigPathOutsideRootError,
+      "escapes its allowed root",
+    );
+    assertEquals(await directoryNames(store.stagingRoot), []);
+    assertEquals(await directoryNames(join(store.installsRoot, "zig")), []);
+  });
+});
+
 Deno.test("wrong staged Zig version removes owned staging and never publishes", async () => {
   await withFixture(async ({ root, manifest, source, adapter }) => {
     const store = new InstallStore(join(root, "data"));
@@ -596,6 +632,8 @@ class RelocatingZigRunner implements ProcessRunner {
   readonly dataRoot: string;
   wrongVersionPhase: "build" | "staging" | "promoted" | null = null;
   removeStdPhase: "build" | "staging" | "promoted" | null = null;
+  outsideLibPhase: "build" | "staging" | "promoted" | null = null;
+  relativeLibDir = false;
   wrongTarget = false;
   failCompile = false;
   wrongCompiledElf = false;
@@ -619,9 +657,14 @@ class RelocatingZigRunner implements ProcessRunner {
         await Deno.remove(join(lib, "std", "std.zig"));
       }
       const target = this.wrongTarget ? "aarch64-unknown-linux-gnu" : HOST_TARGET;
+      const reportedLib = this.outsideLibPhase === phase
+        ? relative(request.cwd ?? Deno.cwd(), join(install, "..", "outside"))
+        : this.relativeLibDir
+        ? relative(request.cwd ?? Deno.cwd(), lib)
+        : lib;
       return phase === "promoted"
-        ? result(`.{\n  .lib_dir = ${JSON.stringify(lib)},\n  .target = "${target}",\n}\n`)
-        : result(`${JSON.stringify({ lib_dir: lib, target })}\n`);
+        ? result(`.{\n  .lib_dir = ${JSON.stringify(reportedLib)},\n  .target = "${target}",\n}\n`)
+        : result(`${JSON.stringify({ lib_dir: reportedLib, target })}\n`);
     }
     if (request.args[0] === "build-exe") {
       if (this.failCompile) return result("", "compile failed\n", 2);
