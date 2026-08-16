@@ -79,7 +79,7 @@ profile=<64-lowercase-hex>
 Reads and writes reject symlinks, unsafe parents, extra fields, malformed IDs, and non-physical
 paths. Publication is atomic.
 
-`ZlsSourceWorkspace` uses only public `@zignado/source-ref` APIs. Stable selection chooses the
+`ZlsSourceWorkspace` uses only public `@reckagentek/source-ref` APIs. Stable selection chooses the
 highest strict ZLS tag matching Zig's major/minor cycle. Development selection follows literal
 symbolic remote HEAD. Exact reconstruction never advances a stored commit.
 

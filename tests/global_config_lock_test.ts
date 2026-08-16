@@ -61,7 +61,7 @@ Deno.test("partial global config merges defaults and injected environment overri
     await Deno.writeTextFile(
       configPath,
       JSON.stringify({
-        $schema: "https://jsr.io/@zignado/zig-manager/zig-manager-global.schema.json",
+        $schema: "https://jsr.io/@reckagentek/zig-manager/zig-manager-global.schema.json",
         zigRepository: "https://example.test/from-file.git",
         build: {
           profile: "debug",

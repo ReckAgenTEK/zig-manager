@@ -438,7 +438,7 @@ Deno.test("package metadata publishes the inert CLI entrypoint and documents non
 
   const readme = await Deno.readTextFile(new URL("../README.md", import.meta.url));
   assertStringIncludes(readme, "deno install --global --name zm");
-  assertStringIncludes(readme, `jsr:@zignado/zig-manager@${deno.version}/cli`);
+  assertStringIncludes(readme, `jsr:@reckagentek/zig-manager@${deno.version}/cli`);
   assertStringIncludes(readme, "deno install --global --force --name zm");
   assertStringIncludes(readme, "deno uninstall --global zm");
   assertEquals(readme.includes("--compile"), false);

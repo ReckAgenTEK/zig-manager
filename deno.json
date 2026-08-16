@@ -1,6 +1,6 @@
 {
-  "name": "@zignado/zig-manager",
-  "version": "0.1.0-beta.3",
+  "name": "@reckagentek/zig-manager",
+  "version": "0.1.0-beta.4",
   "license": "MIT",
   "exports": {
     ".": "./src/mod.ts",
@@ -10,7 +10,7 @@
     "@std/assert": "jsr:@std/assert@1.0.17",
     "@std/path": "jsr:@std/path@1.1.4",
     "@std/path/windows": "jsr:@std/path@1.1.4/windows",
-    "@zignado/source-ref": "jsr:@zignado/source-ref@0.1.0-beta.1"
+    "@reckagentek/source-ref": "jsr:@reckagentek/source-ref@0.1.0-beta.2"
   },
   "fmt": {
     "lineWidth": 100,

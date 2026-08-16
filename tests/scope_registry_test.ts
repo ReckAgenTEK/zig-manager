@@ -342,7 +342,7 @@ Deno.test("scope registry JSON schema is versioned and strict", async () => {
   const schema = JSON.parse(
     await Deno.readTextFile(new URL("../schema/scopes-v1.schema.json", import.meta.url)),
   );
-  assertEquals(schema.$id, "https://jsr.io/@zignado/zig-manager/scopes-v1.schema.json");
+  assertEquals(schema.$id, "https://jsr.io/@reckagentek/zig-manager/scopes-v1.schema.json");
   assertEquals(schema.additionalProperties, false);
   assertEquals(schema.required, ["schemaVersion", "scopes"]);
   assertEquals(schema.properties.schemaVersion.const, 1);

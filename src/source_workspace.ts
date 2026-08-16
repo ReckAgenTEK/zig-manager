@@ -16,7 +16,7 @@ import {
   SourceRefStore,
   type StatusOptions,
   type UpdateOptions,
-} from "@zignado/source-ref";
+} from "@reckagentek/source-ref";
 import { isAbsolute, join, resolve } from "@std/path";
 import {
   InvalidZigSelectorError,

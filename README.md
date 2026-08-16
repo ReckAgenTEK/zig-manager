@@ -21,7 +21,7 @@ remain readable, but they never borrow an unrelated ZLS.
 ```bash
 deno install --global --name zm \
   --allow-env --allow-read --allow-write --allow-run --allow-sys \
-  jsr:@zignado/zig-manager@0.1.0-beta.3/cli
+  jsr:@reckagentek/zig-manager@0.1.0-beta.4/cli
 ```
 
 Check the host without resolving a source:
@@ -317,7 +317,7 @@ Upgrade the Deno launcher intentionally:
 ```bash
 deno install --global --force --name zm \
   --allow-env --allow-read --allow-write --allow-run --allow-sys \
-  jsr:@zignado/zig-manager@<new-version>/cli
+  jsr:@reckagentek/zig-manager@<new-version>/cli
 ```
 
 To remove all manager-owned files, purge first and then uninstall the launcher:
@@ -376,7 +376,7 @@ manager's config, state, data, and cache roots beneath one directory.
 ## Library API
 
 ```ts
-import { ZigManager } from "@zignado/zig-manager";
+import { ZigManager } from "@reckagentek/zig-manager";
 
 const manager = new ZigManager({ cwd: Deno.cwd() });
 await manager.use("stable", { global: true });

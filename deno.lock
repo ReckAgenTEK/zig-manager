@@ -1,12 +1,18 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@reckagentek/source-ref@0.1.0-beta.2": "0.1.0-beta.2",
     "jsr:@std/assert@1.0.17": "1.0.17",
     "jsr:@std/internal@^1.0.12": "1.0.14",
-    "jsr:@std/path@1.1.4": "1.1.4",
-    "jsr:@zignado/source-ref@0.1.0-beta.1": "0.1.0-beta.1"
+    "jsr:@std/path@1.1.4": "1.1.4"
   },
   "jsr": {
+    "@reckagentek/source-ref@0.1.0-beta.2": {
+      "integrity": "bb5bfe023ea562adeddfe5d031bb71174270167cf40411dc729fd0b2c3bd4578",
+      "dependencies": [
+        "jsr:@std/path"
+      ]
+    },
     "@std/assert@1.0.17": {
       "integrity": "df5ebfffe77c03b3fa1401e11c762cc8f603d51021c56c4d15a8c7ab45e90dbe",
       "dependencies": [
@@ -21,19 +27,13 @@
       "dependencies": [
         "jsr:@std/internal"
       ]
-    },
-    "@zignado/source-ref@0.1.0-beta.1": {
-      "integrity": "dbc84697e535a650c91e27466403575130d70e2991754c7c2bfe407cac7f9000",
-      "dependencies": [
-        "jsr:@std/path"
-      ]
     }
   },
   "workspace": {
     "dependencies": [
+      "jsr:@reckagentek/source-ref@0.1.0-beta.2",
       "jsr:@std/assert@1.0.17",
-      "jsr:@std/path@1.1.4",
-      "jsr:@zignado/source-ref@0.1.0-beta.1"
+      "jsr:@std/path@1.1.4"
     ]
   }
 }

@@ -18,7 +18,7 @@ import {
   type RevisionDescription,
   type StatusOptions,
   type UpdateOptions,
-} from "@zignado/source-ref";
+} from "@reckagentek/source-ref";
 import {
   ZigReleaseUnsupportedError,
   ZigSourceNotReadyError,

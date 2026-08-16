@@ -15,7 +15,7 @@ import type {
   StatusOptions,
   SyncOptions,
   UpdateOptions,
-} from "@zignado/source-ref";
+} from "@reckagentek/source-ref";
 import type { ZigBuildRecipeV1 } from "./build_recipe.ts";
 
 export type ZigBuildStrategy = "cmake";

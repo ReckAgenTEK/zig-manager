@@ -28,7 +28,7 @@ The primary workflow is:
 ```bash
 deno install --global --name zm \
   --allow-env --allow-read --allow-write --allow-run --allow-sys \
-  jsr:@zignado/zig-manager@<version>/cli
+  jsr:@reckagentek/zig-manager@<version>/cli
 
 eval "$(zm shell activate bash)"
 
@@ -174,7 +174,7 @@ The release installation command is:
 ```bash
 deno install --global --name zm \
   --allow-env --allow-read --allow-write --allow-run --allow-sys \
-  jsr:@zignado/zig-manager@<version>/cli
+  jsr:@reckagentek/zig-manager@<version>/cli
 ```
 
 Release documentation uses an explicit package version. A user intentionally upgrades with the same
@@ -183,7 +183,7 @@ command plus `--force` and a newer version:
 ```bash
 deno install --global --force --name zm \
   --allow-env --allow-read --allow-write --allow-run --allow-sys \
-  jsr:@zignado/zig-manager@<new-version>/cli
+  jsr:@reckagentek/zig-manager@<new-version>/cli
 ```
 
 The CLI launcher is removed with:
@@ -214,7 +214,7 @@ about managed path containment despite having permission to access other paths.
 
 ### 4.3 Package Requirements
 
-- Keep package name `@zignado/zig-manager`.
+- Keep package name `@reckagentek/zig-manager`.
 - Publish the CLI entry point as `./cli`.
 - Use `import.meta.main` only in the CLI entry point so library imports remain inert.
 - Keep Deno 2 as the only JavaScript/TypeScript runtime path.

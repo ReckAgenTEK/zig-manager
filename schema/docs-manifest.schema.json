@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://jsr.io/@zignado/zig-manager/docs-manifest.schema.json",
+  "$id": "https://jsr.io/@reckagentek/zig-manager/docs-manifest.schema.json",
   "title": "zig-manager docs manifest v2",
   "type": "object",
   "additionalProperties": false,

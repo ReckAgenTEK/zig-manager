@@ -1,8 +1,20 @@
 # Changelog
 
-Notable changes to `@zignado/zig-manager` are recorded here.
+Notable changes to `@reckagentek/zig-manager` are recorded here.
 
 ## [Unreleased]
+
+## [0.1.0-beta.4] - 2026-08-16
+
+### Changed
+
+- Move the JSR package identity to `@reckagentek/zig-manager`.
+- Use `@reckagentek/source-ref@0.1.0-beta.2` for source checkout management.
+
+### Compatibility
+
+- Existing `@zignado/zig-manager` versions remain immutable on JSR. New releases use only the
+  `@reckagentek` scope.
 
 ## [0.1.0-beta.3] - 2026-08-13
 

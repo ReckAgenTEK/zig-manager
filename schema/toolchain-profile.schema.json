@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://jsr.io/@zignado/zig-manager/toolchain-profile.schema.json",
+  "$id": "https://jsr.io/@reckagentek/zig-manager/toolchain-profile.schema.json",
   "title": "zig-manager immutable toolchain profile v1/v2",
   "type": "object",
   "additionalProperties": false,

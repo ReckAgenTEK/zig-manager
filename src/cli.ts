@@ -1,4 +1,4 @@
-import { SourceRefError } from "@zignado/source-ref";
+import { SourceRefError } from "@reckagentek/source-ref";
 import { CLI_JSON_SCHEMA_VERSION } from "./constants.ts";
 import { ZigInvalidArgumentError, ZigManagerError } from "./errors.ts";
 import { CatalogValidationError } from "./global_catalog.ts";

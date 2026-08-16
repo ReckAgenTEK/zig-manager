@@ -1,4 +1,4 @@
-import type { RemoteRef, RevisionDescription } from "@zignado/source-ref";
+import type { RemoteRef, RevisionDescription } from "@reckagentek/source-ref";
 import { join } from "@std/path";
 
 const MAX_BUILD_ZIG_ZON_BYTES = 1024 * 1024;

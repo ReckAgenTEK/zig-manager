@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://jsr.io/@zignado/zig-manager/state.schema.json",
+  "$id": "https://jsr.io/@reckagentek/zig-manager/state.schema.json",
   "title": "zig-manager generated state v2",
   "type": "object",
   "additionalProperties": false,
