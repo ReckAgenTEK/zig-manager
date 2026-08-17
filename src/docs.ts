@@ -1,4 +1,4 @@
-import { join, relative, resolve } from "@std/path";
+import { dirname, join, relative, resolve } from "@std/path";
 import { DOCS_MANIFEST_FILE, SUPPORTED_DOCS_ASSET_CONTRACT } from "./constants.ts";
 import {
   ZigDocsBuildError,
@@ -24,6 +24,7 @@ import type {
   DocsResult,
   ProcessRunner,
   SourceSelectionState,
+  ZigSourceVersion,
 } from "./types.ts";
 
 export interface ManagedDocsContext {
@@ -36,6 +37,295 @@ export interface ManagedDocsContext {
   readonly options: DocsOptions;
   readonly defaultMega: boolean;
   readonly progress: (message: string) => void | Promise<void>;
+}
+
+export interface ManagedInstallDocsContext {
+  readonly adapter: ReleaseAdapter;
+  readonly platform: "linux" | "darwin" | "windows";
+  readonly executable: string;
+  readonly checkoutPath: string;
+  readonly installPath: string;
+  readonly cachePath: string;
+  readonly logsPath: string;
+  readonly llvmConfigPath: string;
+  readonly selector: string;
+  readonly version: ZigSourceVersion;
+  readonly commit: string;
+  readonly runner: ProcessRunner;
+  readonly progress: (message: string) => void | Promise<void>;
+  readonly signal?: AbortSignal;
+}
+
+interface AiDocsIndex {
+  readonly schemaVersion: 1;
+  readonly zig: {
+    readonly selector: string;
+    readonly version: string;
+    readonly commit: string;
+  };
+  readonly entrypoints: {
+    readonly overview: "AI_README.md";
+    readonly languageReference: "langref.html";
+    readonly completeHtml: string;
+    readonly standardLibrary: "std/index.html";
+    readonly standardLibrarySources: "std/sources.tar";
+    readonly installedStandardLibrary: "../lib/zig/std";
+  };
+  readonly artifacts: readonly DocsArtifact[];
+}
+
+export const AI_DOCS_INDEX_FILE = "ai-index.json";
+
+/** Build complete Zig docs directly into an unpublished install staging tree. */
+export async function buildManagedInstallDocs(
+  context: ManagedInstallDocsContext,
+): Promise<void> {
+  const docsRoot = join(context.installPath, "doc");
+  const baseCommand = context.adapter.createDocsCommand({
+    platform: context.platform,
+    executable: context.executable,
+    version: context.version,
+    checkoutPath: context.checkoutPath,
+    prefix: context.installPath,
+    localCache: join(context.cachePath, "docs-local"),
+    globalCache: join(context.cachePath, "docs-global"),
+  });
+  await Promise.all([
+    Deno.mkdir(join(context.cachePath, "docs-local"), { recursive: true }),
+    Deno.mkdir(join(context.cachePath, "docs-global"), { recursive: true }),
+  ]);
+  const libcConfig = context.platform === "linux"
+    ? await prepareLinuxDocsLibcCompatibility({
+      cachePath: context.cachePath,
+      llvmConfigPath: context.llvmConfigPath,
+      runner: context.runner,
+      signal: context.signal,
+    })
+    : null;
+  const command: CommandRecord = libcConfig === null
+    ? baseCommand
+    : { ...baseCommand, env: { ...baseCommand.env, ZIG_LIBC: libcConfig } };
+  await executeDocsCommand(
+    context.runner,
+    command,
+    context.logsPath,
+    context.progress,
+    context.signal,
+  );
+  await finalizeManagedInstallDocs(docsRoot, {
+    selector: context.selector,
+    version: context.version.text,
+    commit: context.commit,
+    signal: context.signal,
+  });
+}
+
+const LINUX_CRT_OBJECTS = ["crt1.o", "Scrt1.o", "rcrt1.o", "crti.o", "crtn.o"] as const;
+const LINUX_CRT_LIBRARIES = [
+  "libc.a",
+  "libm.a",
+  "libpthread.a",
+  "libdl.a",
+  "librt.a",
+  "libutil.a",
+  "libc.so",
+  "libm.so",
+] as const;
+
+/**
+ * Give Zig's bundled LLD CRT objects it can parse on hosts whose system CRTs contain
+ * newer optional ELF metadata (currently GNU `.sframe`). System files remain untouched.
+ */
+export async function prepareLinuxDocsLibcCompatibility(input: {
+  readonly cachePath: string;
+  readonly llvmConfigPath: string;
+  readonly runner: ProcessRunner;
+  readonly signal?: AbortSignal;
+  readonly systemLibDirectory?: string;
+  readonly systemIncludeDirectory?: string;
+}): Promise<string> {
+  const systemLib = input.systemLibDirectory ?? "/usr/lib";
+  const systemInclude = input.systemIncludeDirectory ?? "/usr/include";
+  const root = join(input.cachePath, "docs-libc");
+  const crt = join(root, "crt");
+  const config = join(root, "libc.txt");
+  const objcopy = join(dirname(input.llvmConfigPath), "llvm-objcopy");
+  await removeIfPresent(root, true);
+  await Deno.mkdir(crt, { recursive: true });
+  for (const name of LINUX_CRT_OBJECTS) {
+    if (input.signal?.aborted) throw new ZigOperationAbortedError("prepare docs libc");
+    const destination = join(crt, name);
+    await Deno.copyFile(join(systemLib, name), destination);
+    if (name === "crti.o" || name === "crtn.o") continue;
+    const result = await input.runner.run({
+      executable: objcopy,
+      args: ["--remove-section=.sframe", "--remove-section=.rela.sframe", destination],
+      cwd: root,
+      env: {},
+      clearEnv: true,
+      signal: input.signal,
+    });
+    if (input.signal?.aborted || result.signal !== null) {
+      throw new ZigOperationAbortedError("prepare docs libc");
+    }
+    if (!result.success) {
+      throw new ZigDocsBuildError("LLVM objcopy could not prepare docs libc CRT objects", {
+        executable: objcopy,
+        object: destination,
+        exitCode: result.code,
+        stderr: result.stderr,
+      });
+    }
+  }
+  for (const name of LINUX_CRT_LIBRARIES) {
+    await Deno.symlink(join(systemLib, name), join(crt, name));
+  }
+  await Deno.writeTextFile(
+    config,
+    `include_dir=${systemInclude}\n` +
+      `sys_include_dir=${systemInclude}\n` +
+      `crt_dir=${crt}\n` +
+      "msvc_lib_dir=\n" +
+      "kernel32_lib_dir=\n" +
+      "gcc_dir=\n",
+  );
+  return config;
+}
+
+export async function finalizeManagedInstallDocs(
+  docsRoot: string,
+  provenance: {
+    readonly selector: string;
+    readonly version: string;
+    readonly commit: string;
+    readonly signal?: AbortSignal;
+  },
+): Promise<void> {
+  await validateDocsTree(docsRoot);
+  const generated = await docsArtifacts(docsRoot);
+  const mega = await buildMegaDocs({
+    docsRoot,
+    version: provenance.version,
+    commit: provenance.commit,
+    artifacts: generated,
+    signal: provenance.signal,
+  });
+  const artifacts = [
+    ...await docsArtifacts(docsRoot),
+    { path: mega.path, sha256: mega.sha256, size: mega.size },
+  ];
+  const index: AiDocsIndex = {
+    schemaVersion: 1,
+    zig: {
+      selector: provenance.selector,
+      version: provenance.version,
+      commit: provenance.commit,
+    },
+    entrypoints: {
+      overview: "AI_README.md",
+      languageReference: "langref.html",
+      completeHtml: mega.path,
+      standardLibrary: "std/index.html",
+      standardLibrarySources: "std/sources.tar",
+      installedStandardLibrary: "../lib/zig/std",
+    },
+    artifacts,
+  };
+  await Deno.writeTextFile(join(docsRoot, AI_DOCS_INDEX_FILE), `${canonicalJson(index, 2)}\n`);
+  await Deno.writeTextFile(
+    join(docsRoot, "AI_README.md"),
+    `# Zig ${provenance.version} documentation\n\n` +
+      `Exact source commit: \`${provenance.commit}\`.\n\n` +
+      `For language semantics, read \`langref.html\`. For standard-library APIs, use ` +
+      `\`std/index.html\` or the self-contained \`${mega.path}\`. For token-efficient source ` +
+      `lookup, read Zig files under \`../lib/zig/std\`; \`std/sources.tar\` is the canonical ` +
+      `autodoc source archive. Machine-readable paths and artifact hashes are in ` +
+      `\`${AI_DOCS_INDEX_FILE}\`.\n`,
+  );
+}
+
+/** Verify the required docs and every generated artifact recorded for AI consumers. */
+export async function verifyManagedInstallDocs(
+  installPath: string,
+  expectedVersion: string,
+  expectedCommit: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const docsRoot = join(installPath, "doc");
+  const indexPath = join(docsRoot, AI_DOCS_INDEX_FILE);
+  let value: unknown;
+  try {
+    value = JSON.parse(await Deno.readTextFile(indexPath));
+  } catch {
+    throw new ZigDocsOutputError("AI documentation index cannot be read", indexPath);
+  }
+  const index = validateAiDocsIndex(value, indexPath);
+  if (index.zig.version !== expectedVersion || index.zig.commit !== expectedCommit) {
+    throw new ZigDocsOutputError(
+      "AI documentation provenance does not match installation",
+      indexPath,
+    );
+  }
+  for (const artifact of index.artifacts) {
+    if (signal?.aborted) throw new ZigOperationAbortedError("verify installed docs");
+    const path = join(docsRoot, ...artifact.path.split("/"));
+    const metadata = await fileMetadata(path, signal);
+    if (metadata.sha256 !== artifact.sha256 || metadata.size !== artifact.size) {
+      throw new ZigDocsOutputError("AI documentation artifact differs from index", path);
+    }
+  }
+  for (
+    const required of [
+      "AI_README.md",
+      "langref.html",
+      "std/index.html",
+      index.entrypoints.completeHtml,
+    ]
+  ) {
+    const path = join(docsRoot, ...required.split("/"));
+    const metadata = await fileMetadata(path, signal);
+    if (metadata.size === 0) throw new ZigDocsOutputError("AI documentation file is empty", path);
+  }
+}
+
+function validateAiDocsIndex(value: unknown, path: string): AiDocsIndex {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ZigDocsOutputError("AI documentation index must be an object", path);
+  }
+  const root = value as Record<string, unknown>;
+  if (root.schemaVersion !== 1 || root.zig === null || typeof root.zig !== "object") {
+    throw new ZigDocsOutputError("AI documentation index has invalid schema", path);
+  }
+  const zig = root.zig as Record<string, unknown>;
+  if (
+    typeof zig.selector !== "string" || typeof zig.version !== "string" ||
+    typeof zig.commit !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(zig.commit)
+  ) throw new ZigDocsOutputError("AI documentation provenance is invalid", path);
+  if (!Array.isArray(root.artifacts) || root.artifacts.length === 0) {
+    throw new ZigDocsOutputError("AI documentation artifacts are missing", path);
+  }
+  if (root.entrypoints === null || typeof root.entrypoints !== "object") {
+    throw new ZigDocsOutputError("AI documentation entrypoints are missing", path);
+  }
+  const entrypoints = root.entrypoints as Record<string, unknown>;
+  if (
+    typeof entrypoints.completeHtml !== "string" || entrypoints.completeHtml.includes("/") ||
+    !entrypoints.completeHtml.endsWith("-all.html")
+  ) throw new ZigDocsOutputError("AI documentation complete HTML entrypoint is invalid", path);
+  const artifacts = root.artifacts.map((item, index) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      throw new ZigDocsOutputError(`AI documentation artifact ${index} is invalid`, path);
+    }
+    const artifact = item as Record<string, unknown>;
+    if (
+      typeof artifact.path !== "string" || artifact.path.startsWith("/") ||
+      artifact.path.split("/").includes("..") || typeof artifact.size !== "number" ||
+      !Number.isSafeInteger(artifact.size) || artifact.size < 1 ||
+      typeof artifact.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(artifact.sha256)
+    ) throw new ZigDocsOutputError(`AI documentation artifact ${index} is invalid`, path);
+    return { path: artifact.path, size: artifact.size, sha256: artifact.sha256 };
+  });
+  return { ...root, zig, entrypoints, artifacts } as unknown as AiDocsIndex;
 }
 
 const EXPECTED = [

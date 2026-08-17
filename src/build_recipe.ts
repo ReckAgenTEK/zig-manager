@@ -6,7 +6,9 @@ import { validateZlsSourceVersion, type ZlsSourceVersion } from "./zls_source_ve
 
 export const ZIG_BUILD_RECIPE_SCHEMA_VERSION = 1 as const;
 export const ZLS_BUILD_RECIPE_SCHEMA_VERSION = 1 as const;
-export const ZIG_BUILD_CONTRACT_VERSION = 2 as const;
+export const ZIG_BUILD_CONTRACT_VERSION = 3 as const;
+export const ZIG_DOCS_BUILD_CONTRACT_VERSION = 3 as const;
+const NO_LANGREF_BUILD_CONTRACT_VERSION = 2;
 export const ZIG_INSTALL_VERIFIER_CONTRACT_VERSION = 2 as const;
 export const ZLS_BUILD_RECIPE_ADAPTER_ID = "zls-source-build" as const;
 export const ZLS_BUILD_CONTRACT_VERSION = 1 as const;
@@ -696,7 +698,7 @@ function validateCmakeArguments(
   const extraBuildArguments = configure.filter((argument) =>
     argument.startsWith("-DZIG_EXTRA_BUILD_ARGS=")
   );
-  const requiresNoLangref = buildContractVersion >= ZIG_BUILD_CONTRACT_VERSION;
+  const requiresNoLangref = buildContractVersion >= NO_LANGREF_BUILD_CONTRACT_VERSION;
   if (
     requiresNoLangref &&
     (extraBuildArguments.length !== 1 ||

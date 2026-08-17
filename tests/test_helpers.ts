@@ -77,7 +77,18 @@ export async function createDevelopmentFiles(root: string): Promise<string> {
     await Deno.writeTextFile(join(prefix, "lib", name), "fixture\n");
   }
   await Deno.mkdir(join(root, "tools"), { recursive: true });
-  for (const name of ["cmake", "cc", "c++", "llvm-config", "clang", "ld.lld", "ninja"]) {
+  for (
+    const name of [
+      "cmake",
+      "cc",
+      "c++",
+      "llvm-config",
+      "llvm-objcopy",
+      "clang",
+      "ld.lld",
+      "ninja",
+    ]
+  ) {
     const path = join(root, "tools", name);
     await Deno.writeTextFile(path, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     if (Deno.build.os !== "windows") await Deno.chmod(path, 0o755);

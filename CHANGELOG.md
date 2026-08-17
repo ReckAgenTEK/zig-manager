@@ -4,6 +4,28 @@ Notable changes to `@reckagentek/zig-manager` are recorded here.
 
 ## [Unreleased]
 
+## [0.1.0-beta.5] - 2026-08-17
+
+### Added
+
+- Build and verify Zig language-reference and standard-library documentation with every new Zig
+  installation, including a self-contained HTML bundle and AI-oriented index.
+- Retain the exact Zig source snapshot and provenance beside each immutable compiler installation.
+- Add local-only `zm use --codex-skills` generation for a repository-scoped Codex Desktop skill
+  containing exact compiler, ZLS, source, documentation, and standard-library paths.
+
+### Fixed
+
+- Build Zig 0.16 documentation on current Arch glibc by preparing isolated CRT copies without
+  unsupported `.sframe` metadata; system CRT files remain unchanged.
+- Make retained Arch E2E runs recreate their restricted diagnostic PATH fixture when needed.
+
+### Changed
+
+- Bump the Zig build contract so older cached builds without documentation and retained source are
+  not reused as complete beta.5 builds.
+- Verify retained source during build-cache and immutable-install reuse.
+
 ## [0.1.0-beta.4] - 2026-08-16
 
 ### Changed

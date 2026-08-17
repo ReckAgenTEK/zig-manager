@@ -1,7 +1,11 @@
 import { basename, dirname, join, relative, resolve } from "@std/path";
 import { join as windowsJoin } from "@std/path/windows";
 import { BUILD_MANIFEST_FILE } from "./constants.ts";
-import { validateZigBuildRecipe, type ZigBuildRecipeV1 } from "./build_recipe.ts";
+import {
+  validateZigBuildRecipe,
+  ZIG_DOCS_BUILD_CONTRACT_VERSION,
+  type ZigBuildRecipeV1,
+} from "./build_recipe.ts";
 import {
   BuildManifestValidationError,
   ZigBinaryVerificationError,
@@ -17,6 +21,8 @@ import {
 } from "./filesystem.ts";
 import { readBuildManifest, writeBuildManifest } from "./manifest.ts";
 import { computeInstallationId } from "./install_store.ts";
+import { buildManagedInstallDocs, verifyManagedInstallDocs } from "./docs.ts";
+import { buildManagedSourceSnapshot, verifyManagedSourceSnapshot } from "./source_snapshot.ts";
 import type { ReleaseAdapter } from "./release_adapter.ts";
 import type {
   BuildArtifactPaths,
@@ -155,6 +161,42 @@ export async function buildManagedZig(context: ManagedBuildContext): Promise<Bui
       stagingPaths.install,
       version.text,
       context.runner,
+      context.options.signal,
+    );
+    await buildManagedInstallDocs({
+      adapter: context.adapter,
+      platform: context.platform,
+      executable: stagedExecutable,
+      checkoutPath: context.source.checkoutPath,
+      installPath: stagingPaths.install,
+      cachePath: stagingPaths.cache,
+      logsPath: stagingPaths.logs,
+      llvmConfigPath: context.doctor.toolchain.llvmConfig.executable,
+      selector: context.source.selector,
+      version,
+      commit: context.source.commit,
+      runner: context.runner,
+      progress: context.progress,
+      signal: context.options.signal,
+    });
+    await verifyManagedInstallDocs(
+      stagingPaths.install,
+      version.text,
+      context.source.commit,
+      context.options.signal,
+    );
+    await buildManagedSourceSnapshot({
+      checkoutPath: context.source.checkoutPath,
+      installPath: stagingPaths.install,
+      selector: context.source.selector,
+      version: version.text,
+      commit: context.source.commit,
+      signal: context.options.signal,
+    });
+    await verifyManagedSourceSnapshot(
+      stagingPaths.install,
+      version.text,
+      context.source.commit,
       context.options.signal,
     );
     const finalExecutable = relocate(stagedExecutable, stagingRoot, finalRoot);
@@ -329,6 +371,20 @@ export async function verifyBuildManifest(
     runner,
     signal,
   );
+  if (manifest.recipe.adapter.buildContractVersion >= ZIG_DOCS_BUILD_CONTRACT_VERSION) {
+    await verifyManagedInstallDocs(
+      manifest.paths.install,
+      manifest.source.version.text,
+      manifest.source.commit,
+      signal,
+    );
+    await verifyManagedSourceSnapshot(
+      manifest.paths.install,
+      manifest.source.version.text,
+      manifest.source.commit,
+      signal,
+    );
+  }
   throwIfAborted(signal, "verify managed Zig build");
   if (
     verified.version !== manifest.compiler.version ||

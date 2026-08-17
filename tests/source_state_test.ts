@@ -666,6 +666,20 @@ Deno.test("latest integration uses literal symbolic remote HEAD", async () => {
     assertEquals(sourceRef.calls.filter((call) => call === "listRemoteRefs").length, 0);
     assertEquals(sourceRef.zlsCalls.filter((call) => call === "resolveRemoteHead").length, 1);
     assertEquals(sourceRef.zlsCalls.filter((call) => call === "listRemoteRefs").length, 0);
+    const installRoot = dirname(dirname(used.zig!.executable));
+    const docsRoot = join(installRoot, "doc");
+    const index = JSON.parse(await Deno.readTextFile(join(docsRoot, "ai-index.json")));
+    assertEquals(index.zig, { selector: "latest", version: "0.16.1", commit: COMMIT_B });
+    assertEquals(index.entrypoints.installedStandardLibrary, "../lib/zig/std");
+    assertEquals(
+      await Deno.stat(join(docsRoot, index.entrypoints.completeHtml)).then((s) => s.isFile),
+      true,
+    );
+    assertEquals(await Deno.stat(join(docsRoot, "AI_README.md")).then((s) => s.isFile), true);
+    assertEquals(
+      await Deno.stat(join(installRoot, "src", "zig", "CMakeLists.txt")).then((s) => s.isFile),
+      true,
+    );
   });
 });
 
@@ -698,6 +712,12 @@ Deno.test("data installs survive source, build, and log cache deletion across lo
     sourceRef.calls.length = 0;
 
     assertEquals((await manager.current({ path: project })).installationId, used.installationId);
+    assertEquals(
+      await Deno.stat(
+        join(dirname(dirname(used.zig!.executable)), "src", "zig", "CMakeLists.txt"),
+      ).then((stat) => stat.isFile),
+      true,
+    );
     assertEquals((await manager.run(["version"], { cwd: project })).code, 0);
     assertEquals((await manager.sync({ path: project })).rebuilt, false);
     assertEquals(sourceRef.calls, []);

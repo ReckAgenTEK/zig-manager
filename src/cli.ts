@@ -26,6 +26,7 @@ import type {
   ZigUseResult,
 } from "./types.ts";
 import { ZigManager, type ZigManagerProgress } from "./zig_manager.ts";
+import { writeCodexToolchainSkill } from "./codex_skill.ts";
 
 export interface CliIo {
   readonly stdout: (text: string) => void | Promise<void>;
@@ -141,10 +142,14 @@ export async function runCliDetailed(
         const values = parseOptions(
           parsed.args.slice(1),
           ["--installed", "--path", "--profile", "--jobs"],
-          ["--global", "-g"],
+          ["--global", "-g", "--codex-skills"],
         );
         const scope = scopeOptions(values, signal);
         const installed = value(values, "--installed");
+        const codexSkills = values.flags.has("--codex-skills");
+        if (codexSkills && scope.global === true) {
+          throw new ZigInvalidArgumentError("use --codex-skills requires a local directory scope");
+        }
         let result: ZigUseResult;
         if (installed !== undefined) {
           if (values.positionals.length !== 0 || hasBuildOptions(values)) {
@@ -157,12 +162,19 @@ export async function runCliDetailed(
           const selector = exactlyOne(values.positionals, "use requires one selector");
           result = await manager.use(selector, { ...buildOptions(values, signal), ...scope });
         }
+        const codexSkill = codexSkills
+          ? await writeCodexToolchainSkill(result.scopeRoot!, result)
+          : undefined;
+        const outputResult = codexSkill === undefined ? result : { ...result, codexSkill };
         await output(
           io,
           parsed.json,
           command,
-          result,
-          () => useText(result),
+          outputResult,
+          () =>
+            `${useText(result)}${
+              codexSkill === undefined ? "" : `codex skill: ${codexSkill.skill}\n`
+            }`,
         );
         if (!parsed.json && result.activationRequired) {
           await io.stderr('Activate this shell with: eval "$(zm shell activate bash)"\n');
@@ -941,8 +953,8 @@ Usage:
   zm shell deactivate bash
   zm shell status [-g|--global|--path <directory>] [--json]
   zm install <selector> [--profile <profile>] [--jobs <count>] [--json]
-  zm use <selector> [-g|--global|--path <directory>] [build options] [--json]
-  zm use --installed <profile-or-zig-installation-id> [-g|--global|--path <directory>] [--json]
+  zm use <selector> [-g|--global|--path <directory>] [--codex-skills] [build options] [--json]
+  zm use --installed <profile-or-zig-installation-id> [-g|--global|--path <directory>] [--codex-skills] [--json]
   zm unuse [-g|--global|--path <directory>] [--json]
   zm sync [-g|--global|--path <directory>] [build options] [--json]
   zm update [-g|--global|--path <directory>] [build options] [--json]

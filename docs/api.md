@@ -94,6 +94,18 @@ arguments, environment, and verifier contracts.
 version, ELF/runtime metadata, exact dependency identity, and a bounded LSP initialize/shutdown
 exchange. There are no downloaded binaries, alternate build strategies, or host Zig fallback.
 
+Each Zig build runs the selected source tree's `zig build docs` target with the just-built compiler
+before immutable publication. Build verification requires complete language-reference and standard
+autodoc assets plus a self-contained HTML bundle and machine-readable `doc/ai-index.json` with exact
+version, commit, paths, sizes, and hashes. Failed or incomplete docs therefore fail the Zig build;
+they are not optional side data.
+
+The same immutable installation retains a regular-file snapshot of the exact Zig checkout under
+`install/src/zig` and provenance in `install/src/source.json`. Build and installed-object reuse both
+verify this snapshot, so source-cache cleanup cannot leave a selected compiler without its matching
+source. The CLI-only `use --codex-skills` integration writes a repository-scoped Codex skill that
+references these immutable resources; it does not change the `ZigManager` facade contract.
+
 ## Diagnostics And Cleanup
 
 - `doctor` uses the effective local/global profile. `{ global: true }` inspects only the global

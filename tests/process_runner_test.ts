@@ -67,17 +67,15 @@ Deno.test("Deno process runner propagates SIGINT and SIGTERM and rejects child e
     let readyResolve!: () => void;
     const ready = new Promise<void>((resolve) => readyResolve = resolve);
     const script = `
-      const signal = Deno.args[0];
-      Deno.addSignalListener(signal, async () => {
-        await Deno.stdout.write(new TextEncoder().encode(signal + "\\n"));
-        Deno.exit(0);
-      });
-      await Deno.stdout.write(new TextEncoder().encode("ready\\n"));
-      await new Promise(() => {});
+      trap 'printf "%s\\n" "$SIGNAL"; exit 0' INT TERM
+      printf 'ready\\n'
+      while :; do :; done
     `;
     const pending = new DenoProcessRunner({ terminationGraceMs: 100 }).run({
-      executable: Deno.execPath(),
-      args: ["eval", script, expected],
+      executable: "/bin/sh",
+      args: ["-c", script],
+      env: { SIGNAL: expected },
+      clearEnv: true,
       signal: controller.signal,
       onStdout: (chunk) => {
         output += new TextDecoder().decode(chunk);

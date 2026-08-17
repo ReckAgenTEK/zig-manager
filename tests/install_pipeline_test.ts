@@ -24,7 +24,9 @@ import {
 import { validateBuildManifest } from "../src/manifest.ts";
 import { ZigCMake21Adapter } from "../src/release_adapter.ts";
 import { createBuildPaths } from "../src/build.ts";
+import { finalizeManagedInstallDocs, prepareLinuxDocsLibcCompatibility } from "../src/docs.ts";
 import { prepareZigBuildRecipe } from "../src/recipe_preparation.ts";
+import { buildManagedSourceSnapshot } from "../src/source_snapshot.ts";
 import { validateZigBuildRecipe, type ZigBuildRecipeV1 } from "../src/build_recipe.ts";
 import type {
   BuildIdentityInput,
@@ -38,6 +40,7 @@ import type {
 } from "../src/types.ts";
 import {
   createDevelopmentFiles,
+  createDocsFixture,
   FakeProcessRunner,
   writeElf64X86_64,
   zigVersionMetadata,
@@ -58,6 +61,59 @@ const STATIC_RUNTIME_INSPECTOR: RuntimeDependencyInspector = {
   contractVersion: 1,
   inspect: () => Promise.resolve({ linkage: "static" }),
 };
+
+Deno.test("Linux docs libc compatibility strips unsupported CRT metadata without changing system files", async () => {
+  const root = await Deno.makeTempDir({ prefix: "zig-manager-docs-libc-" });
+  try {
+    const systemLib = join(root, "system-lib");
+    const systemInclude = join(root, "include");
+    const tools = join(root, "tools");
+    await Promise.all([
+      Deno.mkdir(systemLib),
+      Deno.mkdir(systemInclude),
+      Deno.mkdir(tools),
+    ]);
+    for (
+      const name of [
+        "crt1.o",
+        "Scrt1.o",
+        "rcrt1.o",
+        "crti.o",
+        "crtn.o",
+        "libc.a",
+        "libm.a",
+        "libpthread.a",
+        "libdl.a",
+        "librt.a",
+        "libutil.a",
+        "libc.so",
+        "libm.so",
+      ]
+    ) await Deno.writeTextFile(join(systemLib, name), `system:${name}\n`);
+    const llvmConfig = join(tools, "llvm-config");
+    await Deno.writeTextFile(llvmConfig, "fixture\n");
+    const runner = new FakeProcessRunner(root);
+    const config = await prepareLinuxDocsLibcCompatibility({
+      cachePath: join(root, "cache"),
+      llvmConfigPath: llvmConfig,
+      runner,
+      systemLibDirectory: systemLib,
+      systemIncludeDirectory: systemInclude,
+    });
+    assertStringIncludes(
+      await Deno.readTextFile(config),
+      `crt_dir=${join(root, "cache", "docs-libc", "crt")}`,
+    );
+    assertEquals(await Deno.readTextFile(join(systemLib, "crt1.o")), "system:crt1.o\n");
+    assertEquals(
+      runner.requests.filter((request) => request.executable.endsWith("llvm-objcopy")).length,
+      3,
+    );
+    assert((await Deno.lstat(join(root, "cache", "docs-libc", "crt", "libc.so"))).isSymlink);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
 
 Deno.test("BuildManifest install identity is deterministic and excludes output paths and timestamps", async () => {
   await withFixture(async ({ root, manifest, source, adapter }) => {
@@ -717,6 +773,9 @@ async function createBuildFixture(
   recipe: BuildManifest["recipe"],
 ): Promise<BuildManifest> {
   const paths = createBuildPaths(root, "linux");
+  const sourcePath = join(root, "source");
+  await Deno.mkdir(sourcePath, { recursive: true });
+  await Deno.writeTextFile(join(sourcePath, "CMakeLists.txt"), "project(zig)\n");
   await Deno.mkdir(join(paths.install, "bin"), { recursive: true });
   await Deno.mkdir(join(paths.install, "lib", "zig", "std"), { recursive: true });
   await Deno.mkdir(join(paths.install, "share"), { recursive: true });
@@ -729,6 +788,19 @@ async function createBuildFixture(
   await Deno.writeTextFile(join(paths.install, "share", "mode.txt"), "mode fixture\n", {
     mode: 0o640,
   });
+  await createDocsFixture(join(paths.install, "doc"));
+  await finalizeManagedInstallDocs(join(paths.install, "doc"), {
+    selector: VERSION,
+    version: VERSION,
+    commit: COMMIT,
+  });
+  await buildManagedSourceSnapshot({
+    checkoutPath: sourcePath,
+    installPath: paths.install,
+    selector: VERSION,
+    version: VERSION,
+    commit: COMMIT,
+  });
   if (Deno.build.os !== "windows") {
     await Deno.chmod(paths.executable, 0o751);
     await Deno.chmod(join(paths.install, "share", "mode.txt"), 0o640);
@@ -736,7 +808,6 @@ async function createBuildFixture(
   const configuration = buildIdentityFixture(recipe);
   const identity = await computeInstallationId(recipe);
   const metadata = await fileMetadata(paths.executable);
-  const sourcePath = join(root, "source");
   const replace = (value: string) =>
     value.replaceAll("$SOURCE", sourcePath).replaceAll(
       "$BUILD",
