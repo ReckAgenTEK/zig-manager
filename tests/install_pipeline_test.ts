@@ -24,7 +24,11 @@ import {
 import { validateBuildManifest } from "../src/manifest.ts";
 import { ZigCMake21Adapter } from "../src/release_adapter.ts";
 import { createBuildPaths } from "../src/build.ts";
-import { finalizeManagedInstallDocs, prepareLinuxDocsLibcCompatibility } from "../src/docs.ts";
+import {
+  finalizeManagedInstallDocs,
+  prepareLinuxDocsLibcCompatibility,
+  requiresArchDocsLibcCompatibility,
+} from "../src/docs.ts";
 import { prepareZigBuildRecipe } from "../src/recipe_preparation.ts";
 import { buildManagedSourceSnapshot } from "../src/source_snapshot.ts";
 import { validateZigBuildRecipe, type ZigBuildRecipeV1 } from "../src/build_recipe.ts";
@@ -61,6 +65,18 @@ const STATIC_RUNTIME_INSPECTOR: RuntimeDependencyInspector = {
   contractVersion: 1,
   inspect: () => Promise.resolve({ linkage: "static" }),
 };
+
+Deno.test("docs libc compatibility is enabled only for Arch Linux", async () => {
+  assertEquals(await requiresArchDocsLibcCompatibility(() => Promise.resolve('ID="arch"\n')), true);
+  assertEquals(
+    await requiresArchDocsLibcCompatibility(() => Promise.resolve("ID=ubuntu\n")),
+    false,
+  );
+  assertEquals(
+    await requiresArchDocsLibcCompatibility(() => Promise.reject(new Deno.errors.NotFound())),
+    false,
+  );
+});
 
 Deno.test("Linux docs libc compatibility strips unsupported CRT metadata without changing system files", async () => {
   const root = await Deno.makeTempDir({ prefix: "zig-manager-docs-libc-" });

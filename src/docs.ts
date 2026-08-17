@@ -94,7 +94,8 @@ export async function buildManagedInstallDocs(
     Deno.mkdir(join(context.cachePath, "docs-local"), { recursive: true }),
     Deno.mkdir(join(context.cachePath, "docs-global"), { recursive: true }),
   ]);
-  const libcConfig = context.platform === "linux"
+  const libcConfig = context.platform === "linux" &&
+      await requiresArchDocsLibcCompatibility()
     ? await prepareLinuxDocsLibcCompatibility({
       cachePath: context.cachePath,
       llvmConfigPath: context.llvmConfigPath,
@@ -131,6 +132,19 @@ const LINUX_CRT_LIBRARIES = [
   "libc.so",
   "libm.so",
 ] as const;
+
+/** Arch's glibc CRT layout needs an isolated compatibility copy for Zig's bundled LLD. */
+export async function requiresArchDocsLibcCompatibility(
+  readOsRelease: () => Promise<string> = () => Deno.readTextFile("/etc/os-release"),
+): Promise<boolean> {
+  try {
+    const text = await readOsRelease();
+    const match = /^ID=(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s#]+))\s*$/m.exec(text);
+    return (match?.[1] ?? match?.[2] ?? match?.[3] ?? null) === "arch";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Give Zig's bundled LLD CRT objects it can parse on hosts whose system CRTs contain

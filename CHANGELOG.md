@@ -18,6 +18,8 @@ Notable changes to `@reckagentek/zig-manager` are recorded here.
 
 - Build Zig 0.16 documentation on current Arch glibc by preparing isolated CRT copies without
   unsupported `.sframe` metadata; system CRT files remain unchanged.
+- Apply the Arch CRT compatibility step only on Arch hosts, keeping portable offline checks
+  independent of Arch filesystem paths.
 - Make retained Arch E2E runs recreate their restricted diagnostic PATH fixture when needed.
 
 ### Changed
