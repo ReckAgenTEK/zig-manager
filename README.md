@@ -64,13 +64,20 @@ zls --version
 zm current
 ```
 
+Every new managed Zig build also generates and verifies its matching language and standard-library
+documentation. The immutable Zig installation contains `doc/langref.html`, `doc/std/`, and a
+self-contained `doc/zig-<version>-all.html`. AI tools should start with `doc/AI_README.md` or
+`doc/ai-index.json`; the index records exact source provenance, stable entry points, and artifact
+hashes, while the installed `lib/zig/std` tree provides token-efficient plain Zig source lookup.
+Find the installation root with `dirname "$(dirname "$(zm which zig)")"`.
+
 ### 3. Override The Default In A Project
 
 Run `zm use` inside the project directory:
 
 ```bash
 cd ~/Projects/example
-zm use 0.16
+zm use 0.16 --codex-skills
 ```
 
 That selection applies to the directory and all of its descendants:
@@ -82,6 +89,9 @@ zls --version
 ```
 
 Outside that directory tree, the global default still applies.
+
+`--codex-skills` is optional. It creates a repository-scoped Codex Desktop skill for this exact
+toolchain; omit it when the project does not need agent integration.
 
 ### 4. Inspect What Will Run
 
@@ -220,6 +230,7 @@ the global default leaves project selections intact and restores external fallba
 | --------------------------------------------- | ---------------------------------------------------------------------- |
 | `zm install <selector>`                       | Build and store a Zig/ZLS pair without selecting it                    |
 | `zm use <selector>`                           | Build or reuse a pair and select it for the current directory          |
+| `zm use <selector> --codex-skills`            | Select locally and write exact Zig paths as a repository Codex skill   |
 | `zm use --global <selector>`                  | Build or reuse a pair and make it the global default                   |
 | `zm use stable --refresh-zls`                 | Refresh the compatible stable ZLS before selecting the pair            |
 | `zm use --installed <profile-or-zig-id>`      | Select a paired profile or Zig installation without source work        |
@@ -239,6 +250,12 @@ the global default leaves project selections intact and restores external fallba
 
 Most selection-aware commands accept either `--path <directory>` or `-g`/`--global`. They cannot be
 combined. Run `zm help` or see [`docs/cli.md`](./docs/cli.md) for every option.
+
+`zm use <selector> --codex-skills` and `zm use --installed <id> --codex-skills` write
+`.agents/skills/zig-manager-toolchain/SKILL.md` and its Codex Desktop UI metadata in the selected
+local directory (the current directory by default). The generated skill points agents at the exact
+compiler, ZLS executable, retained Zig source snapshot, language reference, standard-library docs,
+and installed standard-library source. `--codex-skills` cannot target the global selection.
 
 Non-runtime commands accept `--json`. Stable success and error envelopes go to stdout, while build
 progress and human diagnostics go to stderr. `zm run` passes through the child's streams and exit
@@ -261,6 +278,10 @@ configured. It never executes a package installation command or switches to anot
 
 Build profiles are `debug`, `release`, `relwithdebinfo`, and `minsizerel`. Pass `--profile` and
 `--jobs` to `install`, `use`, `sync`, or `update` when command-specific values are needed.
+
+Every new immutable Zig installation retains its exact source at `install/src/zig`, provenance at
+`install/src/source.json`, and generated documentation at `install/doc`. These resources survive
+source-cache and build-cache cleanup with the compiler.
 
 ## Configuration
 
@@ -345,8 +366,8 @@ remain strict and readable. Re-select a source selector to create a pair; `zm up
 legacy profile whose stored selector is moving.
 
 Because persistent resolvers outlive the Deno launcher, run `zm purge --yes` before
-`deno uninstall --global zm` when removing beta.2 completely. See [`CHANGELOG.md`](./CHANGELOG.md)
-for the release summary.
+`deno uninstall --global zm` when removing beta.2 or newer completely. See
+[`CHANGELOG.md`](./CHANGELOG.md) for release summaries.
 
 ## Storage
 
@@ -359,7 +380,7 @@ $XDG_STATE_HOME/zig-manager/catalog.json
 $XDG_STATE_HOME/zig-manager/scopes.json
 $XDG_STATE_HOME/zig-manager/stable-zls/
 $XDG_STATE_HOME/zig-manager/locks/
-$XDG_DATA_HOME/zig-manager/installs/{zig,zls}/
+$XDG_DATA_HOME/zig-manager/installs/{zig,zls}/<installation-id>/install/
 $XDG_DATA_HOME/zig-manager/profiles/
 $XDG_DATA_HOME/zig-manager/shims/
 $XDG_CACHE_HOME/zig-manager/{sources,builds,logs}/
@@ -379,7 +400,8 @@ manager's config, state, data, and cache roots beneath one directory.
 - `zm` inspects prerequisites but never installs system packages or chooses a fallback build
   strategy.
 - Full verification covers immutable data, version output, ELF/runtime metadata, Zig compile/run
-  behavior, and a bounded ZLS LSP initialize/shutdown exchange.
+  behavior, generated documentation, retained Zig source, and a bounded ZLS LSP initialize/shutdown
+  exchange.
 
 ## Library API
 
@@ -413,7 +435,8 @@ deno task test:e2e:arch
 ```
 
 The Arch gate installs a real Deno launcher, builds and verifies a compatible Zig/ZLS release pair,
-tests local/global/fallback resolver precedence, compiles a real program, checks exact reuse, and
+generates a repository Codex skill, checks retained source/docs after cache deletion, tests
+local/global/fallback resolver precedence, compiles a real program, checks exact reuse, and
 exercises real prerequisite diagnostics. It contacts upstream repositories and is intentionally
 expensive.
 

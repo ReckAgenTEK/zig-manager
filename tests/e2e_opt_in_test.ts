@@ -1,4 +1,4 @@
-import { fromFileUrl, join } from "@std/path";
+import { dirname, fromFileUrl, join } from "@std/path";
 
 const STARTUP_TIMEOUT_MS = 20_000;
 const CDP_COMMAND_TIMEOUT_MS = 15_000;
@@ -495,7 +495,14 @@ printf 'version=%s\n' "$(zig version)"
   const initial = parseUseResult(
     await runZmSuccess(
       zm,
-      ["use", COMPATIBLE_RELEASE_SELECTOR, "--path", projectRoot, "--json"],
+      [
+        "use",
+        COMPATIBLE_RELEASE_SELECTOR,
+        "--path",
+        projectRoot,
+        "--codex-skills",
+        "--json",
+      ],
       {
         cwd: projectRoot,
         env,
@@ -513,6 +520,30 @@ printf 'version=%s\n' "$(zig version)"
   assertCondition(/^[0-9a-f]{40}$/.test(initial.commit), "release did not resolve an exact commit");
   assertCondition(await isExecutableFile(initial.executable), "release executable is not runnable");
   assertCondition(await isExecutableFile(initial.zls.executable), "release ZLS is not runnable");
+  const initialInstall = dirname(dirname(initial.executable));
+  const retainedSourceRoot = join(initialInstall, "src", "zig");
+  const retainedSource = join(retainedSourceRoot, "CMakeLists.txt");
+  const codexSkill = join(
+    projectRoot,
+    ".agents",
+    "skills",
+    "zig-manager-toolchain",
+    "SKILL.md",
+  );
+  assertCondition((await Deno.stat(retainedSource)).isFile, "release source snapshot is absent");
+  const codexSkillText = await Deno.readTextFile(codexSkill);
+  assertCondition(
+    codexSkillText.includes(initial.executable),
+    "Codex skill omitted Zig executable",
+  );
+  assertCondition(
+    codexSkillText.includes(retainedSourceRoot),
+    "Codex skill omitted retained source",
+  );
+  assertCondition(
+    codexSkillText.includes(join(initialInstall, "doc", "AI_README.md")),
+    "Codex skill omitted AI documentation guide",
+  );
   assertCondition(await isExecutableFile(persistentZig), "persistent Zig resolver is absent");
   assertCondition(await isExecutableFile(persistentZls), "persistent ZLS resolver is absent");
   const initialAdapter = await installAdapterId(managerHome, initial.installationId);
@@ -799,16 +830,17 @@ printf 'compiled=ok\n'
   const pinBeforeFailure = await Deno.readTextFile(parentPin);
   const buildsBeforeFailure = await relativeTree(join(managerHome, "cache", "builds"));
   const restrictedPath = join(sandbox, "restricted tool path");
-  if (!resume) {
-    await Deno.mkdir(restrictedPath);
-    for (
-      const [name, target] of [
-        ["deno", Deno.execPath()],
-        ["git", "/usr/bin/git"],
-        ["cmake", "/usr/bin/cmake"],
-      ] as const
-    ) {
-      await Deno.symlink(target, join(restrictedPath, name));
+  await Deno.mkdir(restrictedPath, { recursive: true });
+  for (
+    const [name, target] of [
+      ["deno", Deno.execPath()],
+      ["git", "/usr/bin/git"],
+      ["cmake", "/usr/bin/cmake"],
+    ] as const
+  ) {
+    const link = join(restrictedPath, name);
+    if (await Deno.lstat(link).catch(() => null) === null) {
+      await Deno.symlink(target, link);
     }
   }
   const failed = await runZmFailure(
@@ -888,6 +920,10 @@ printf 'compiled=ok\n'
   assertCondition(
     afterCacheDeletion.outside === FALLBACK_ZIG_VERSION,
     "cache deletion changed fallback behavior",
+  );
+  assertCondition(
+    (await Deno.stat(retainedSource)).isFile,
+    "source-cache deletion removed immutable Zig source",
   );
 
   await logE2e(`${

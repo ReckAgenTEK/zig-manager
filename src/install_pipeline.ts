@@ -5,7 +5,11 @@ import {
   resolve as windowsResolve,
 } from "@std/path/windows";
 import { parseZigEnvLibDir, verifyBuildManifest } from "./build.ts";
-import { validateZigBuildRecipe, ZIG_INSTALL_VERIFIER_CONTRACT_VERSION } from "./build_recipe.ts";
+import {
+  validateZigBuildRecipe,
+  ZIG_DOCS_BUILD_CONTRACT_VERSION,
+  ZIG_INSTALL_VERIFIER_CONTRACT_VERSION,
+} from "./build_recipe.ts";
 import { type Elf64X86_64Info, inspectElf64X86_64 } from "./elf.ts";
 import { ZigBinaryVerificationError, ZigOperationAbortedError } from "./errors.ts";
 import { assertPathContained, canonicalJson, fileMetadata, isPathContained } from "./filesystem.ts";
@@ -29,6 +33,7 @@ import { validateBuildManifest } from "./manifest.ts";
 import { type ToolchainHostIdentity, validateHostIdentity } from "./profile_store.ts";
 import type { ReleaseAdapter } from "./release_adapter.ts";
 import type { BuildManifest, ProcessRunner } from "./types.ts";
+import { verifyManagedSourceSnapshot } from "./source_snapshot.ts";
 
 export const BUILD_MANIFEST_INSTALL_CONTRACT = "zig-build-manifest-v2/install-manifest-v3-v1";
 
@@ -255,6 +260,14 @@ export async function reuseInstalledZig(
     operationId,
     signal: input.signal,
   });
+  if (recipe.adapter.buildContractVersion >= ZIG_DOCS_BUILD_CONTRACT_VERSION) {
+    await verifyManagedSourceSnapshot(
+      join(installed.root, "install"),
+      source.version,
+      source.commit,
+      input.signal,
+    );
+  }
   throwIfAborted(input.signal, "reuse immutable Zig installation");
   return installed;
 }
@@ -513,6 +526,14 @@ export async function installBuiltZig(
       operationId,
       signal: input.signal,
     });
+    if (buildManifest.recipe.adapter.buildContractVersion >= ZIG_DOCS_BUILD_CONTRACT_VERSION) {
+      await verifyManagedSourceSnapshot(
+        join(existing.root, "install"),
+        source.version,
+        source.commit,
+        input.signal,
+      );
+    }
     return {
       ...existing,
       installationId,
@@ -570,6 +591,14 @@ export async function installBuiltZig(
       operationId,
       signal: input.signal,
     });
+    if (buildManifest.recipe.adapter.buildContractVersion >= ZIG_DOCS_BUILD_CONTRACT_VERSION) {
+      await verifyManagedSourceSnapshot(
+        staging.installPath,
+        source.version,
+        source.commit,
+        input.signal,
+      );
+    }
 
     const finalRoot = input.store.installationPath("zig", installationId);
     const runtime = relocateRuntimeLinkage(
@@ -610,6 +639,14 @@ export async function installBuiltZig(
       operationId,
       signal: input.signal,
     });
+    if (buildManifest.recipe.adapter.buildContractVersion >= ZIG_DOCS_BUILD_CONTRACT_VERSION) {
+      await verifyManagedSourceSnapshot(
+        join(published.root, "install"),
+        source.version,
+        source.commit,
+        input.signal,
+      );
+    }
     if (stagedVerification.normalizedHostTarget !== promotedVerification.normalizedHostTarget) {
       verificationFailure("compiler-reported target changed after installation promotion", {
         stagedTarget: stagedVerification.reportedHostTarget,

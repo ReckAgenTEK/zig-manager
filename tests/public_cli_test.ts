@@ -1,4 +1,5 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { join } from "@std/path";
 import * as publicApi from "../src/mod.ts";
 import {
   type CliManager,
@@ -119,6 +120,49 @@ Deno.test("CLI restricts ZLS refresh to the stable selector", async () => {
   assertEquals(fake.calls, []);
   assertEquals(JSON.parse(output.stdout()).error.code, "ZIG_INVALID_ARGUMENT");
   assertEquals(output.stderr(), "");
+});
+
+Deno.test("use --codex-skills writes a repository-scoped Codex skill", async () => {
+  const root = await Deno.makeTempDir({ prefix: "zig-manager-codex-skill-" });
+  try {
+    const fake = new FakeCliManager();
+    const output = capture();
+    assertEquals(
+      await runCli(
+        ["use", "0.16.0", "--path", root, "--codex-skills", "--json"],
+        output.io,
+        () => fake,
+      ),
+      0,
+    );
+    const skill = join(root, ".agents", "skills", "zig-manager-toolchain", "SKILL.md");
+    const metadata = join(
+      root,
+      ".agents",
+      "skills",
+      "zig-manager-toolchain",
+      "agents",
+      "openai.yaml",
+    );
+    assertStringIncludes(await Deno.readTextFile(skill), "name: zig-manager-toolchain");
+    assertStringIncludes(await Deno.readTextFile(skill), "/managed/install/src/zig");
+    assertStringIncludes(await Deno.readTextFile(metadata), "Managed Zig Toolchain");
+    const document = JSON.parse(output.stdout());
+    assertEquals(document.result.codexSkill.skill, skill);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("use --codex-skills rejects global scope before manager mutation", async () => {
+  const fake = new FakeCliManager();
+  const output = capture();
+  assertEquals(
+    await runCli(["use", "0.16.0", "--global", "--codex-skills", "--json"], output.io, () => fake),
+    1,
+  );
+  assertEquals(fake.calls, []);
+  assertEquals(JSON.parse(output.stdout()).error.code, "ZIG_INVALID_ARGUMENT");
 });
 
 Deno.test("CLI exposes exact installation uninstall with JSON output", async () => {
@@ -878,7 +922,7 @@ function component(
     installationId: tool === "zig" ? ID : ZLS_ID,
     version: "0.16.0",
     commit: tool === "zig" ? COMMIT : ZLS_COMMIT,
-    executable: `/managed/${tool}`,
+    executable: `/managed/install/bin/${tool}`,
     reused: true,
   };
 }

@@ -9,8 +9,8 @@ zm shell status [-g|--global|--path <directory>]
 
 zm install <selector> [--profile <profile>] [--jobs <count>]
 zm uninstall <installation-id>
-zm use <selector> [-g|--global|--path <directory>] [--refresh-zls] [build options]
-zm use --installed <profile-or-zig-installation-id> [-g|--global|--path <directory>]
+zm use <selector> [-g|--global|--path <directory>] [--refresh-zls] [--codex-skills] [build options]
+zm use --installed <profile-or-zig-installation-id> [-g|--global|--path <directory>] [--codex-skills]
 zm unuse [-g|--global|--path <directory>]
 zm sync [-g|--global|--path <directory>] [build options]
 zm update [-g|--global|--path <directory>] [build options]
@@ -60,6 +60,12 @@ selector; for `stable`, it reuses an existing exact-Zig stable-ZLS pin unless Zi
 `zm use stable --refresh-zls` to check for a newer compatible ZLS when Zig is unchanged. An exact
 tag or commit remains immutable. Human and JSON output identify both components. Legacy top-level
 `installationId`, `version`, `commit`, and `executable` fields are Zig aliases.
+
+`use --codex-skills` and `use --installed ... --codex-skills` are local-only. They write a
+repository skill at `.agents/skills/zig-manager-toolchain/SKILL.md` under the selected directory,
+plus `agents/openai.yaml` for Codex Desktop UI metadata. The skill contains exact absolute paths for
+the selected Zig and ZLS executables, retained source, generated docs, and installed standard
+library. JSON output adds a `codexSkill` object containing the generated paths.
 
 ## Resolution
 
