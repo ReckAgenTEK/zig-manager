@@ -29,6 +29,7 @@ export class PlatformPaths {
   readonly catalogFile: string;
   readonly scopesFile: string;
   readonly globalProfileFile: string;
+  readonly stableZlsDir: string;
   readonly locksDir: string;
   readonly shimsDir: string;
   readonly globalBinDir: string;
@@ -79,6 +80,7 @@ export class PlatformPaths {
     this.catalogFile = child(this.stateRoot, "catalog.json");
     this.scopesFile = child(this.stateRoot, "scopes.json");
     this.globalProfileFile = child(this.stateRoot, GLOBAL_PROFILE_FILE_NAME);
+    this.stableZlsDir = child(this.stateRoot, "stable-zls");
     this.locksDir = child(this.stateRoot, "locks");
     this.shimsDir = child(this.dataRoot, "shims");
     this.globalBinDir = denoGlobalBinPath(input.env.DENO_INSTALL_ROOT, this.home);

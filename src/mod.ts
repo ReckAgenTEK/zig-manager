@@ -97,6 +97,7 @@ export {
   ZigStateValidationError,
   ZigVersionNotFoundError,
   ZlsCompatibilityNotFoundError,
+  ZlsStablePinInvalidError,
 } from "./errors.ts";
 export {
   CANONICAL_ZIG_REPOSITORY_URL,
@@ -327,6 +328,7 @@ export type {
   ResolvedZigSelection,
   RevisionDescription,
   RunOptions,
+  ScopedBuildOptions,
   ScopeOperationOptions,
   SourceRefApi,
   SourceRefDoctorResult,

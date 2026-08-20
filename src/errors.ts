@@ -36,7 +36,8 @@ export type ZigManagerErrorCode =
   | "ZIG_FALLBACK_NOT_FOUND"
   | "ZIG_SHELL_UNSUPPORTED"
   | "ZIG_PURGE_CONFIRMATION_REQUIRED"
-  | "ZLS_COMPATIBILITY_NOT_FOUND";
+  | "ZLS_COMPATIBILITY_NOT_FOUND"
+  | "ZLS_STABLE_PIN_INVALID";
 
 export class ZigManagerError extends Error {
   readonly code: ZigManagerErrorCode;
@@ -284,6 +285,18 @@ export class ZigIoError extends ZigManagerError {
 export class ZigInvalidArgumentError extends ZigManagerError {
   constructor(message: string, details: Readonly<Record<string, unknown>> = {}) {
     super("ZIG_INVALID_ARGUMENT", message, details);
+  }
+}
+
+export class ZlsStablePinInvalidError extends ZigManagerError {
+  constructor(path: string, reason: string, options?: ErrorOptions) {
+    super(
+      "ZLS_STABLE_PIN_INVALID",
+      `Invalid stable ZLS pin '${path}': ${reason}`,
+      { path, reason },
+      options,
+      "Run 'zm use stable --refresh-zls' to replace the invalid stable ZLS pin.",
+    );
   }
 }
 

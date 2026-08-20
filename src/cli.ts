@@ -141,13 +141,14 @@ export async function runCliDetailed(
         const values = parseOptions(
           parsed.args.slice(1),
           ["--installed", "--path", "--profile", "--jobs"],
-          ["--global", "-g"],
+          ["--global", "-g", "--refresh-zls"],
         );
         const scope = scopeOptions(values, signal);
         const installed = value(values, "--installed");
+        const refreshZls = values.flags.has("--refresh-zls");
         let result: ZigUseResult;
         if (installed !== undefined) {
-          if (values.positionals.length !== 0 || hasBuildOptions(values)) {
+          if (values.positionals.length !== 0 || hasBuildOptions(values) || refreshZls) {
             throw new ZigInvalidArgumentError(
               "use --installed accepts only a profile ID or Zig installation ID and one scope option",
             );
@@ -155,7 +156,14 @@ export async function runCliDetailed(
           result = await manager.useInstalled(installed, scope);
         } else {
           const selector = exactlyOne(values.positionals, "use requires one selector");
-          result = await manager.use(selector, { ...buildOptions(values, signal), ...scope });
+          if (refreshZls && selector !== "stable") {
+            throw new ZigInvalidArgumentError("--refresh-zls requires the 'stable' Zig selector");
+          }
+          result = await manager.use(selector, {
+            ...buildOptions(values, signal),
+            ...scope,
+            ...(refreshZls ? { refreshZls: true } : {}),
+          });
         }
         await output(
           io,
@@ -941,7 +949,7 @@ Usage:
   zm shell deactivate bash
   zm shell status [-g|--global|--path <directory>] [--json]
   zm install <selector> [--profile <profile>] [--jobs <count>] [--json]
-  zm use <selector> [-g|--global|--path <directory>] [build options] [--json]
+  zm use <selector> [-g|--global|--path <directory>] [--refresh-zls] [build options] [--json]
   zm use --installed <profile-or-zig-installation-id> [-g|--global|--path <directory>] [--json]
   zm unuse [-g|--global|--path <directory>] [--json]
   zm sync [-g|--global|--path <directory>] [build options] [--json]

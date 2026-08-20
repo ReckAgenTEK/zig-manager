@@ -21,7 +21,7 @@ remain readable, but they never borrow an unrelated ZLS.
 ```bash
 deno install --global --name zm \
   --allow-env --allow-read --allow-write --allow-run --allow-sys \
-  jsr:@reckagentek/zig-manager@0.1.0-beta.4/cli
+  jsr:@reckagentek/zig-manager@0.1.0-beta.6/cli
 ```
 
 Check the host without resolving a source:
@@ -128,8 +128,14 @@ missing or invalid, resolution stops with an error instead of falling through to
 | `branch:<name>`      | Current commit on a named branch          | `zm use branch:master`      |
 | `commit:<object-id>` | Exact 40- or 64-digit commit              | `zm use commit:<object-id>` |
 
-For a stable Zig release, `zm` chooses the highest strict ZLS tag in the same major/minor release
-line. For a development Zig selection, it resolves ZLS remote `HEAD` and requires both sources to
+For a stable Zig release, the first use chooses the newest compatible strict ZLS tag in the same
+major/minor release line and records that choice manager-wide for the exact Zig installation. Later
+`zm use stable` calls still resolve Zig normally. When that resolution selects an exact Zig
+installation with a stable-ZLS pin, `zm` reuses and fully verifies the pinned ZLS without ZLS remote
+or source work. `--refresh-zls` forces discovery of the newest compatible stable ZLS; the stable-ZLS
+pin changes only after the new pair builds and verifies successfully.
+
+For a development Zig selection, `zm` resolves ZLS remote `HEAD` and requires both sources to
 declare the same release cycle.
 
 `latest` does not mean latest stable. Because it follows both upstream development heads, temporary
@@ -215,6 +221,7 @@ the global default leaves project selections intact and restores external fallba
 | `zm install <selector>`                       | Build and store a Zig/ZLS pair without selecting it                    |
 | `zm use <selector>`                           | Build or reuse a pair and select it for the current directory          |
 | `zm use --global <selector>`                  | Build or reuse a pair and make it the global default                   |
+| `zm use stable --refresh-zls`                 | Refresh the compatible stable ZLS before selecting the pair            |
 | `zm use --installed <profile-or-zig-id>`      | Select a paired profile or Zig installation without source work        |
 | `zm list [--remote]`                          | List stored components, profiles, and optional remote Zig tags         |
 | `zm current [--check]`                        | Show the effective pair and optionally check a moving Zig selector     |
@@ -350,6 +357,7 @@ $XDG_CONFIG_HOME/zig-manager/config.json
 $XDG_STATE_HOME/zig-manager/global-profile
 $XDG_STATE_HOME/zig-manager/catalog.json
 $XDG_STATE_HOME/zig-manager/scopes.json
+$XDG_STATE_HOME/zig-manager/stable-zls/
 $XDG_STATE_HOME/zig-manager/locks/
 $XDG_DATA_HOME/zig-manager/installs/{zig,zls}/
 $XDG_DATA_HOME/zig-manager/profiles/

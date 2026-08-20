@@ -136,6 +136,144 @@ Deno.test("use builds globally but publishes only a directory pin and no global 
   });
 });
 
+Deno.test("stable ZLS discovery is reused across scopes without ZLS source work", async () => {
+  await withManager(async ({ manager, sourceRef, project, other }) => {
+    const first = await manager.use("stable", { path: project });
+    assertEquals(first.zls?.selector, "0.16.2");
+    assertEquals(
+      sourceRef.zlsCalls.filter((call) => call === "listRemoteRefs").length,
+      1,
+    );
+    assertEquals(
+      JSON.parse(
+        await Deno.readTextFile(
+          join(manager.paths.stableZlsDir, `${first.installationId}.json`),
+        ),
+      ).zlsInstallationId,
+      first.zls?.installationId,
+    );
+
+    sourceRef.zlsCalls.length = 0;
+    sourceRef.failZlsRemote = true;
+    const reused = await manager.use("stable", { path: other });
+
+    assertEquals(reused.reused, true);
+    assertEquals(reused.zls?.installationId, first.zls?.installationId);
+    assertEquals(reused.profileId, first.profileId);
+    assertEquals(sourceRef.zlsCalls, []);
+  });
+});
+
+Deno.test("stable ZLS discovery skips newer tags incompatible with the exact Zig", async () => {
+  await withManager(async ({ manager, sourceRef }) => {
+    addStableZls(sourceRef, "0.16.3", COMMIT_F, "0.16.1");
+
+    const selected = await manager.use("stable");
+
+    assertEquals(selected.version, "0.16.0");
+    assertEquals(selected.zls?.selector, "0.16.2");
+    assertEquals(
+      sourceRef.zlsCalls.filter((call) => call === "listRemoteRefs").length,
+      1,
+    );
+  });
+});
+
+Deno.test("refresh-zls advances stable ZLS and later scopes reuse it without remote access", async () => {
+  await withManager(async ({ manager, sourceRef, project, other }) => {
+    const first = await manager.use("stable", { path: project });
+    addStableZls(sourceRef, "0.16.3", COMMIT_F);
+    sourceRef.zlsCalls.length = 0;
+
+    const refreshed = await manager.use("stable", { path: project, refreshZls: true });
+    assertEquals(refreshed.zls?.selector, "0.16.3");
+    assert(refreshed.zls?.installationId !== first.zls?.installationId);
+    assert(refreshed.profileId !== first.profileId);
+    assertEquals(
+      sourceRef.zlsCalls.filter((call) => call === "listRemoteRefs").length,
+      1,
+    );
+    assertEquals(
+      JSON.parse(
+        await Deno.readTextFile(
+          join(manager.paths.stableZlsDir, `${refreshed.installationId}.json`),
+        ),
+      ).zlsInstallationId,
+      refreshed.zls?.installationId,
+    );
+
+    sourceRef.zlsCalls.length = 0;
+    sourceRef.failZlsRemote = true;
+    const reused = await manager.use("stable", { path: other });
+    assertEquals(reused.zls?.installationId, refreshed.zls?.installationId);
+    assertEquals(reused.profileId, refreshed.profileId);
+    assertEquals(sourceRef.zlsCalls, []);
+  });
+});
+
+Deno.test("failed stable ZLS refresh preserves the effective association and local pin", async () => {
+  await withManager(async ({ manager, sourceRef, runner, project, other }) => {
+    const first = await manager.use("stable", { path: project });
+    const pinBytes = await Deno.readFile(first.pinPath);
+    const stablePinPath = join(manager.paths.stableZlsDir, `${first.installationId}.json`);
+    const stablePinBytes = await Deno.readFile(stablePinPath);
+    addStableZls(sourceRef, "0.16.3", COMMIT_F);
+    runner.failZlsBuild = true;
+
+    await assertRejects(
+      () => manager.use("stable", { path: project, refreshZls: true }),
+      Error,
+      "building ZLS",
+    );
+    assertEquals(await Deno.readFile(first.pinPath), pinBytes);
+    assertEquals(await Deno.readFile(stablePinPath), stablePinBytes);
+    assertEquals((await manager.current({ path: project })).profileId, first.profileId);
+
+    runner.failZlsBuild = false;
+    sourceRef.zlsCalls.length = 0;
+    sourceRef.failZlsRemote = true;
+    const reused = await manager.use("stable", { path: other });
+    assertEquals(reused.zls?.installationId, first.zls?.installationId);
+    assertEquals(reused.profileId, first.profileId);
+    assertEquals(sourceRef.zlsCalls, []);
+  });
+});
+
+Deno.test("stable Zig advancement gets a distinct stable ZLS association", async () => {
+  await withManager(async ({ manager, sourceRef, runner, project, other }) => {
+    const first = await manager.use("stable", { path: project });
+    sourceRef.refs.push({ kind: "tag", name: "0.16.1", commit: COMMIT_B });
+    runner.zigVersion = "0.16.1";
+    sourceRef.zlsCalls.length = 0;
+
+    const moved = await manager.use("stable", { path: other });
+    assertEquals(moved.commit, COMMIT_B);
+    assertEquals(moved.version, "0.16.1");
+    assert(moved.installationId !== first.installationId);
+    assert(moved.zls?.installationId !== first.zls?.installationId);
+    assertEquals(moved.zls?.selector, "0.16.2");
+    assertEquals(
+      sourceRef.zlsCalls.filter((call) => call === "listRemoteRefs").length,
+      1,
+    );
+  });
+});
+
+Deno.test("update re-resolves stable Zig but reuses its pinned ZLS without source work", async () => {
+  await withManager(async ({ manager, sourceRef, project }) => {
+    const first = await manager.use("stable", { path: project });
+    sourceRef.zlsCalls.length = 0;
+    sourceRef.failZlsRemote = true;
+
+    const updated = await manager.update({ path: project });
+    assertEquals(updated.profileId, first.profileId);
+    assertEquals(updated.zls?.installationId, first.zls?.installationId);
+    assertEquals(updated.reused, true);
+    assertEquals(updated.changed, false);
+    assertEquals(sourceRef.zlsCalls, []);
+  });
+});
+
 Deno.test("successful scope mutations reconcile the advisory registry", async () => {
   await withManager(async ({ manager, project, home }) => {
     const used = await manager.use("0.16");
@@ -493,6 +631,30 @@ Deno.test("uninstall requires explicit profile pruning and rebuilds the catalog"
     assertEquals(removed.component, "zig");
     await assertRejects(() => Deno.lstat(removed.root), Deno.errors.NotFound);
     assertEquals((await manager.list()).installations, []);
+  });
+});
+
+Deno.test("uninstall clears a stable ZLS association before removing its installation", async () => {
+  await withManager(async ({ manager, sourceRef, project, other }) => {
+    const used = await manager.use("stable", { path: project });
+    const stablePinPath = join(manager.paths.stableZlsDir, `${used.installationId}.json`);
+    await manager.unuse({ path: project });
+    await manager.gc({ profiles: true });
+
+    await manager.uninstall(used.zls!.installationId);
+    await assertRejects(() => Deno.lstat(stablePinPath), Deno.errors.NotFound);
+
+    sourceRef.zlsCalls.length = 0;
+    const restored = await manager.use("stable", { path: other });
+    assertEquals(restored.zls?.selector, used.zls?.selector);
+    assertEquals(
+      sourceRef.zlsCalls.filter((call) => call === "listRemoteRefs").length,
+      1,
+    );
+    assertEquals(
+      JSON.parse(await Deno.readTextFile(stablePinPath)).zlsInstallationId,
+      restored.zls?.installationId,
+    );
   });
 });
 
@@ -1343,6 +1505,22 @@ function recordingServices(paths: PlatformPaths, events?: string[]): ZigManagerS
       remove: (scope) => pins.remove(scope),
     },
   };
+}
+
+function addStableZls(
+  sourceRef: FakeSourceRef,
+  tag: string,
+  commit: string,
+  minimumBuildVersion = "0.16.0",
+): void {
+  sourceRef.zlsRefs.push({ kind: "tag", name: tag, commit });
+  sourceRef.zlsVersions.set(commit, {
+    declaredVersion: tag,
+    minimumBuildVersion,
+    maximumBuildVersionExclusive: null,
+    tag,
+    distance: 0,
+  });
 }
 
 function managerEnvironment(

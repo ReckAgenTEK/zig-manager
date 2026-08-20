@@ -13,6 +13,7 @@ import type {
   GcOptions,
   ProcessResult,
   RunOptions,
+  ScopedBuildOptions,
   ScopeOperationOptions,
   UseOptions,
   ZigInstallResult,
@@ -64,6 +65,7 @@ Deno.test("CLI import is inert, help names zm commands, and JSON errors are stab
       "purge",
     ]
   ) assertStringIncludes(output.stdout(), command);
+  assertStringIncludes(output.stdout(), "--refresh-zls");
   assertEquals(output.stderr(), "");
 
   output.reset();
@@ -91,6 +93,34 @@ Deno.test("CLI parses use --installed and path without invoking source-oriented 
   assertEquals(output.stderr(), "");
 });
 
+Deno.test("CLI rejects ZLS refresh with use --installed", async () => {
+  const fake = new FakeCliManager();
+  const output = capture();
+  assertEquals(
+    await runCli(
+      ["use", "--installed", ID, "--refresh-zls", "--json"],
+      output.io,
+      () => fake,
+    ),
+    1,
+  );
+  assertEquals(fake.calls, []);
+  assertEquals(JSON.parse(output.stdout()).error.code, "ZIG_INVALID_ARGUMENT");
+  assertEquals(output.stderr(), "");
+});
+
+Deno.test("CLI restricts ZLS refresh to the stable selector", async () => {
+  const fake = new FakeCliManager();
+  const output = capture();
+  assertEquals(
+    await runCli(["use", "latest", "--refresh-zls", "--json"], output.io, () => fake),
+    1,
+  );
+  assertEquals(fake.calls, []);
+  assertEquals(JSON.parse(output.stdout()).error.code, "ZIG_INVALID_ARGUMENT");
+  assertEquals(output.stderr(), "");
+});
+
 Deno.test("CLI exposes exact installation uninstall with JSON output", async () => {
   const fake = new FakeCliManager();
   const output = capture();
@@ -108,18 +138,28 @@ Deno.test("CLI exposes exact installation uninstall with JSON output", async () 
   });
 });
 
-Deno.test("CLI parses build options and emits activation reminder only for human use", async () => {
+Deno.test("CLI parses build and ZLS refresh options and emits activation reminder", async () => {
   const fake = new FakeCliManager();
   const output = capture();
   await runCli(
-    ["use", "latest", "--path", "/scope", "--profile", "debug", "--jobs", "7"],
+    [
+      "use",
+      "stable",
+      "--path",
+      "/scope",
+      "--profile",
+      "debug",
+      "--jobs",
+      "7",
+      "--refresh-zls",
+    ],
     output.io,
     () => fake,
   );
   assertEquals(fake.calls, [{
     method: "use",
-    selector: "latest",
-    options: { path: "/scope", profile: "debug", jobs: 7 },
+    selector: "stable",
+    options: { path: "/scope", profile: "debug", jobs: 7, refreshZls: true },
   }]);
   assertStringIncludes(output.stdout(), "/scope");
   assertStringIncludes(output.stdout(), "zig: 0.16.0");
@@ -513,7 +553,7 @@ class FakeCliManager implements CliManager {
     });
   }
 
-  sync(options: UseOptions = {}) {
+  sync(options: ScopedBuildOptions = {}) {
     this.calls.push({ method: "sync", ...(options.global ? { global: true } : {}) });
     return Promise.resolve({
       schemaVersion: 2 as const,
@@ -528,7 +568,7 @@ class FakeCliManager implements CliManager {
     });
   }
 
-  update(options: UseOptions = {}) {
+  update(options: ScopedBuildOptions = {}) {
     this.calls.push({ method: "update", ...(options.global ? { global: true } : {}) });
     return Promise.resolve({
       ...useResult("latest", options.global ? null : "/scope"),

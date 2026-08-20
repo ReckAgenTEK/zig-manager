@@ -573,9 +573,13 @@ export interface ScopeOperationOptions extends OperationOptions {
   readonly global?: boolean;
 }
 
-export interface UseOptions extends BuildOptions {
+export interface ScopedBuildOptions extends BuildOptions {
   readonly path?: string;
   readonly global?: boolean;
+}
+
+export interface UseOptions extends ScopedBuildOptions {
+  readonly refreshZls?: boolean;
 }
 
 export interface CurrentOptions extends ScopeOperationOptions {

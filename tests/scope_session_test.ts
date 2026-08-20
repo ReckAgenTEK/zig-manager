@@ -51,6 +51,10 @@ Deno.test("platform paths use only injected XDG, home, platform, and relocation 
     fallback.globalProfileFile,
     "/home/test user/.local/state/zig-manager/global-profile",
   );
+  assertEquals(
+    fallback.stableZlsDir,
+    "/home/test user/.local/state/zig-manager/stable-zls",
+  );
 
   const xdg = new PlatformPaths({
     env: {
@@ -88,6 +92,7 @@ Deno.test("platform paths use only injected XDG, home, platform, and relocation 
   assertEquals(relocated.dataDir, "/isolated/manager home '$;[]/data");
   assertEquals(relocated.cacheDir, "/isolated/manager home '$;[]/cache");
   assertEquals(relocated.globalProfileFile, "/isolated/manager home '$;[]/state/global-profile");
+  assertEquals(relocated.stableZlsDir, "/isolated/manager home '$;[]/state/stable-zls");
   assertEquals(
     relocated.assertDataPath(join(relocated.dataDir, "profiles", PROFILE_A)),
     join(relocated.dataDir, "profiles", PROFILE_A),

@@ -222,6 +222,46 @@ Deno.test("exact stable tags, branches, and commits preserve ref kind", async ()
   });
 });
 
+Deno.test("prepareStable tries strict same-cycle tags newest first with one remote listing", async () => {
+  await withFixture(async ({ fake, workspace }) => {
+    fake.addVersion(COMMIT_A, "0.16.1", "0.16.1", 0);
+    fake.addVersion(COMMIT_B, "0.16.2", "0.16.2", 0);
+    fake.addVersion(COMMIT_C, "0.17.0", "0.17.0", 0);
+    fake.refs.push(
+      { kind: "tag", name: "0.16.1", commit: COMMIT_A },
+      { kind: "tag", name: "0.17.0", commit: COMMIT_C },
+      { kind: "tag", name: "0.16.2", commit: COMMIT_B },
+      { kind: "tag", name: "v0.16.3", commit: COMMIT_C },
+    );
+    const candidates: string[] = [];
+    let callbacks = 0;
+
+    const selected = await workspace.prepareStable(
+      0,
+      16,
+      (prepared) => {
+        callbacks++;
+        return prepared;
+      },
+      {
+        acceptStable: (prepared) => {
+          candidates.push(prepared.source.requestedSelector);
+          return prepared.source.requestedSelector === "0.16.1";
+        },
+      },
+    );
+
+    assertEquals(candidates, ["0.16.2", "0.16.1"]);
+    assertEquals(selected.source.requestedSelector, "0.16.1");
+    assertEquals(selected.checkout.requested, { kind: "tag", value: "0.16.1" });
+    assertEquals(callbacks, 1);
+    assertEquals(
+      fake.calls.filter((call) => call.method === "listRemoteRefs").length,
+      1,
+    );
+  });
+});
+
 Deno.test("prepareExact reconstructs the stored commit and version without remote discovery", async () => {
   await withFixture(async ({ fake, setClockFailure, workspace }) => {
     fake.addVersion(COMMIT_A, "0.16.0", "0.16.0", 0);

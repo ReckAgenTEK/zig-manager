@@ -4,6 +4,17 @@ Notable changes to `@reckagentek/zig-manager` are recorded here.
 
 ## [Unreleased]
 
+## [0.1.0-beta.6] - 2026-08-20
+
+### Added
+
+- Add `zm use stable --refresh-zls` to discover and select the newest compatible stable ZLS.
+
+### Changed
+
+- Reuse the manager-wide ZLS selection associated with an exact stable Zig installation without
+  repeating ZLS remote or source work.
+
 ## [0.1.0-beta.4] - 2026-08-16
 
 ### Changed

@@ -26,18 +26,25 @@ offline tests.
 - `install(selector, options?)` builds or reuses Zig and compatible ZLS, then stores a schema-v2
   paired profile without selecting it.
 - `use(selector, options?)` performs the paired install and atomically selects the profile locally
-  or with `{ global: true }`.
-- `useInstalled(id, options?)` selects an existing paired profile or Zig installation without source
-  operations. A ZLS installation ID cannot define a selection. Strict schema-v1 profiles remain
-  readable.
+  or with `{ global: true }`. `{ refreshZls: true }` forces stable-ZLS discovery.
+- `useInstalled(id, options?)` selects an existing paired profile or Zig installation without any
+  remote or source operations. A ZLS installation ID cannot define a selection. Strict schema-v1
+  profiles remain readable.
 - `unuse(options?)`, `sync(options?)`, and `update(options?)` accept `{ path }` or
   `{ global: true }`.
 - `uninstall(installationId)` removes one unreferenced component. A Zig installation cannot be
-  removed while an exact ZLS dependency or retained profile references it.
+  removed while an exact ZLS dependency or retained profile references it. Removing an otherwise
+  unreferenced pinned ZLS clears its stable-ZLS pin first.
 
 `UseOptions.profile` configures the Zig CMake build. `jobs` is forwarded to both builds. ZLS uses
 its canonical release-safe profile unless a lower-level recipe API explicitly chooses another
 profile.
+
+The first stable use discovers the highest compatible ZLS tag and records a manager-wide stable-ZLS
+pin for the exact Zig installation. Later stable uses still resolve Zig normally, then reuse and
+fully verify that pinned ZLS without ZLS remote or source work. `UseOptions.refreshZls` forces
+discovery of the newest compatible stable ZLS and replaces the pin only after the new pair builds
+and verifies successfully.
 
 Global mutations acquire the global lock; local mutations acquire the physical scope lock. Later
 work follows source, install, and catalog ordering under one operation UUID. A profile pointer is
@@ -79,9 +86,14 @@ profile=<64-lowercase-hex>
 Reads and writes reject symlinks, unsafe parents, extra fields, malformed IDs, and non-physical
 paths. Publication is atomic.
 
-`ZlsSourceWorkspace` uses only public `@reckagentek/source-ref` APIs. Stable selection chooses the
-highest strict ZLS tag matching Zig's major/minor cycle. Development selection follows literal
-symbolic remote HEAD. Exact reconstruction never advances a stored commit.
+Stable uses keep one atomic state pin per exact Zig installation under `PlatformPaths.stableZlsDir`.
+Each pin names the exact verified ZLS installation preferred for that Zig. Profiles remain immutable
+history; `refreshZls` replaces only this manager-wide preference.
+
+`ZlsSourceWorkspace` uses only public `@reckagentek/source-ref` APIs. Stable selection tries strict
+ZLS tags in Zig's major/minor cycle newest-first and selects the first source-compatible candidate.
+Development selection follows literal symbolic remote HEAD. Exact reconstruction never advances a
+stored commit.
 
 ## Build And Verification
 

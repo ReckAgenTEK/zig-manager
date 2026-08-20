@@ -107,23 +107,31 @@ export function selectHighestZlsTag(
   major: number,
   minor: number,
 ): ZlsStableTag | null {
+  return selectZlsStableTags(refs, major, minor)[0] ?? null;
+}
+
+/** Selects strict tags in one release cycle, newest first. */
+export function selectZlsStableTags(
+  refs: readonly RemoteRef[],
+  major: number,
+  minor: number,
+): readonly ZlsStableTag[] {
   requiredVersionComponent(major, "major");
   requiredVersionComponent(minor, "minor");
-  let selected: ZlsStableTag | null = null;
+  const selectedByTag = new Map<string, ZlsStableTag>();
   for (const ref of refs) {
     if (ref.kind !== "tag") continue;
     const version = parseZlsStableTag(ref.name);
     if (version === null || version.major !== major || version.minor !== minor) continue;
     const candidate = { tag: ref.name, version, commit: ref.commit };
-    if (
-      selected === null || compareZlsVersions(candidate.version, selected.version) > 0 ||
-      compareZlsVersions(candidate.version, selected.version) === 0 &&
-        compareText(candidate.commit, selected.commit) < 0
-    ) {
-      selected = candidate;
+    const selected = selectedByTag.get(candidate.tag);
+    if (selected === undefined || compareText(candidate.commit, selected.commit) < 0) {
+      selectedByTag.set(candidate.tag, candidate);
     }
   }
-  return selected;
+  return [...selectedByTag.values()].sort((left, right) =>
+    compareZlsVersions(right.version, left.version) || compareText(left.commit, right.commit)
+  );
 }
 
 export async function readZlsSourceVersion(

@@ -22,7 +22,7 @@ import { GlobalOperationLockManager } from "./global_operation_lock.ts";
 import {
   parseZlsStableTag,
   readZlsSourceMetadata,
-  selectHighestZlsTag,
+  selectZlsStableTags,
   validateZlsSourceVersion,
   type ZlsSourceVersion,
   type ZlsZigCompatibility,
@@ -139,6 +139,11 @@ export interface PreparedZlsSource {
   readonly revision: RevisionDescription;
   readonly repositoryHome: string;
   readonly checkoutPath: string;
+}
+
+export interface PrepareStableZlsSourceOptions extends PrepareZlsSourceOptions {
+  /** Accepts a materialized stable candidate before the install callback runs. */
+  readonly acceptStable?: (prepared: PreparedZlsSource) => boolean | Promise<boolean>;
 }
 
 export type ZlsSourceWorkspaceErrorCode =
@@ -307,22 +312,7 @@ export class ZlsSourceWorkspace {
     minor: number,
     options: ResolveZlsSourceOptions = {},
   ): Promise<ZlsSourceWorkspaceResolution> {
-    throwIfAborted(options.signal, `resolve stable ZLS cycle ${major}.${minor}`);
-    const refs = await this.#sourceRef.listRemoteRefs({
-      url: ZLS_SOURCE_REPOSITORY_URL,
-      kind: "tag",
-      signal: options.signal,
-    });
-    throwIfAborted(options.signal, `resolve stable ZLS cycle ${major}.${minor}`);
-    const selected = selectHighestZlsTag(refs, major, minor);
-    if (selected === null) throw new ZlsSourceVersionNotFoundError(`${major}.${minor}.x`);
-    return {
-      requestedSelector: selected.tag,
-      resolvedRef: { kind: "tag", value: selected.tag },
-      checkoutRef: { kind: "tag", value: selected.tag },
-      commit: remoteCommit(selected.commit, selected.tag),
-      resolvedAt: timestamp(this.#now()),
-    };
+    return (await this.#resolveStableCandidates(major, minor, options))[0];
   }
 
   /** Resolves, validates, and exposes source while retaining the manager source lock. */
@@ -364,14 +354,17 @@ export class ZlsSourceWorkspace {
     }
   }
 
-  /** Resolves and prepares the highest strict tag in one release cycle under one source lease. */
+  /** Prepares strict cycle tags newest-first until the optional predicate accepts one. */
   async prepareStable<T>(
     major: number,
     minor: number,
     callback: (prepared: PreparedZlsSource) => T | Promise<T>,
-    options: PrepareZlsSourceOptions = {},
+    options: PrepareStableZlsSourceOptions = {},
   ): Promise<T> {
     requiredCallback(callback);
+    if (options.acceptStable !== undefined && typeof options.acceptStable !== "function") {
+      throw new TypeError("ZLS stable candidate predicate must be a function");
+    }
     const cycle = `${major}.${minor}`;
     const lease = await this.#locks.acquireSource({
       operation: options.operation ?? `prepare stable ZLS cycle ${cycle}`,
@@ -384,18 +377,25 @@ export class ZlsSourceWorkspace {
     try {
       throwIfAborted(options.signal, `prepare stable ZLS cycle ${cycle}`);
       await this.#progress(`Resolving stable ZLS cycle '${cycle}'...\n`);
-      const resolution = await this.resolveStable(major, minor, options);
-      throwIfAborted(options.signal, `prepare stable ZLS cycle ${cycle}`);
-      await this.#progress(
-        `Preparing ZLS source '${resolution.requestedSelector}' at ${resolution.commit}...\n`,
-      );
-      const prepared = await this.#materialize(
-        resolution,
-        lease.owner.operationId,
-        options.signal,
-      );
-      throwIfAborted(options.signal, `prepare stable ZLS cycle ${cycle}`);
-      return await callback(prepared);
+      const resolutions = await this.#resolveStableCandidates(major, minor, options);
+      for (const resolution of resolutions) {
+        throwIfAborted(options.signal, `prepare stable ZLS cycle ${cycle}`);
+        await this.#progress(
+          `Preparing ZLS source '${resolution.requestedSelector}' at ${resolution.commit}...\n`,
+        );
+        const prepared = await this.#materialize(
+          resolution,
+          lease.owner.operationId,
+          options.signal,
+        );
+        throwIfAborted(options.signal, `prepare stable ZLS cycle ${cycle}`);
+        if (options.acceptStable !== undefined && !(await options.acceptStable(prepared))) {
+          continue;
+        }
+        throwIfAborted(options.signal, `prepare stable ZLS cycle ${cycle}`);
+        return await callback(prepared);
+      }
+      throw new ZlsSourceVersionNotFoundError(`${major}.${minor}.x`);
     } catch (cause) {
       if (options.signal?.aborted && !(cause instanceof ZlsSourceOperationAbortedError)) {
         throw aborted(`prepare stable ZLS cycle ${cycle}`, options.signal, cause);
@@ -404,6 +404,31 @@ export class ZlsSourceWorkspace {
     } finally {
       await lease.release();
     }
+  }
+
+  async #resolveStableCandidates(
+    major: number,
+    minor: number,
+    options: ResolveZlsSourceOptions,
+  ): Promise<readonly ZlsSourceWorkspaceResolution[]> {
+    const cycle = `${major}.${minor}`;
+    throwIfAborted(options.signal, `resolve stable ZLS cycle ${cycle}`);
+    const refs = await this.#sourceRef.listRemoteRefs({
+      url: ZLS_SOURCE_REPOSITORY_URL,
+      kind: "tag",
+      signal: options.signal,
+    });
+    throwIfAborted(options.signal, `resolve stable ZLS cycle ${cycle}`);
+    const selected = selectZlsStableTags(refs, major, minor);
+    if (selected.length === 0) throw new ZlsSourceVersionNotFoundError(`${cycle}.x`);
+    const resolvedAt = timestamp(this.#now());
+    return selected.map((candidate) => ({
+      requestedSelector: candidate.tag,
+      resolvedRef: { kind: "tag", value: candidate.tag },
+      checkoutRef: { kind: "tag", value: candidate.tag },
+      commit: remoteCommit(candidate.commit, candidate.tag),
+      resolvedAt,
+    }));
   }
 
   /** Reconstructs stored ZLS source without remote HEAD/ref discovery or reading the clock. */
