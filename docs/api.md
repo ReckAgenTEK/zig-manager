@@ -25,8 +25,10 @@ offline tests.
   remote tags.
 - `install(selector, options?)` builds or reuses Zig and compatible ZLS, then stores a schema-v2
   paired profile without selecting it.
-- `use(selector, options?)` performs the paired install and atomically selects the profile locally
-  or with `{ global: true }`. `{ refreshZls: true }` forces stable-ZLS discovery.
+- `use(selector, options?)` first reuses the newest matching installed pair without source work,
+  then performs the paired install on a cache miss and atomically selects the profile locally or
+  with `{ global: true }`. Explicit build options bypass local-first reuse. `{ refreshZls: true }`
+  forces stable-ZLS discovery.
 - `useInstalled(id, options?)` selects an existing paired profile or Zig installation without any
   remote or source operations. A ZLS installation ID cannot define a selection. Strict schema-v1
   profiles remain readable.
@@ -41,15 +43,17 @@ its canonical release-safe profile unless a lower-level recipe API explicitly ch
 profile.
 
 The first stable use discovers the highest compatible ZLS tag and records a manager-wide stable-ZLS
-pin for the exact Zig installation. Later stable uses still resolve Zig normally, then reuse and
-fully verify that pinned ZLS without ZLS remote or source work. `UseOptions.refreshZls` forces
-discovery of the newest compatible stable ZLS and replaces the pin only after the new pair builds
-and verifies successfully.
+pin for the exact Zig installation. Later stable uses select the newest matching installed profile
+without Zig or ZLS remote/source work; `update()` re-resolves the moving Zig selector.
+`UseOptions.refreshZls` forces discovery of the newest compatible stable ZLS and replaces the pin
+only after the new pair builds and verifies successfully.
 
 Global mutations acquire the global lock; local mutations acquire the physical scope lock. Later
-work follows source, install, and catalog ordering under one operation UUID. A profile pointer is
-published only after both immutable installations, full verification, profile creation, catalog
-rebuild, and persistent resolver installation succeed.
+work follows source, install, and catalog ordering under one operation UUID. Facade mutations use
+fail-fast acquisition: live owners produce a busy error, while locks proven to have dead local PIDs
+are atomically removed and retried. A profile pointer is published only after both immutable
+installations, full verification, profile creation, catalog rebuild, and persistent resolver
+installation succeed.
 
 ## Resolution And Execution
 

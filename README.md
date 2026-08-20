@@ -21,7 +21,7 @@ remain readable, but they never borrow an unrelated ZLS.
 ```bash
 deno install --global --name zm \
   --allow-env --allow-read --allow-write --allow-run --allow-sys \
-  jsr:@reckagentek/zig-manager@0.1.0-beta.6/cli
+  jsr:@reckagentek/zig-manager@0.1.0-beta.7/cli
 ```
 
 Check the host without resolving a source:
@@ -140,10 +140,10 @@ missing or invalid, resolution stops with an error instead of falling through to
 
 For a stable Zig release, the first use chooses the newest compatible strict ZLS tag in the same
 major/minor release line and records that choice manager-wide for the exact Zig installation. Later
-`zm use stable` calls still resolve Zig normally. When that resolution selects an exact Zig
-installation with a stable-ZLS pin, `zm` reuses and fully verifies the pinned ZLS without ZLS remote
-or source work. `--refresh-zls` forces discovery of the newest compatible stable ZLS; the stable-ZLS
-pin changes only after the new pair builds and verifies successfully.
+`zm use stable` calls select the newest matching installed profile without Zig or ZLS remote/source
+work. Run `zm update` to check for a newer stable Zig. `--refresh-zls` forces discovery of the
+newest compatible stable ZLS; the stable-ZLS pin changes only after the new pair builds and verifies
+successfully.
 
 For a development Zig selection, `zm` resolves ZLS remote `HEAD` and requires both sources to
 declare the same release cycle.
@@ -173,7 +173,15 @@ the matching immutable profile on other machines. Otherwise, add it to the repos
 
 ### Reuse An Existing Build Without Source Work
 
-Find a paired profile ID or Zig installation ID, then select it:
+Use its selector normally. `zm` checks matching installed profiles before resolving source:
+
+```bash
+zm use stable
+zm use 0.16
+zm use 0.16.0
+```
+
+To select one exact profile or disambiguate profiles sharing a Zig installation ID:
 
 ```bash
 zm list
@@ -397,6 +405,8 @@ manager's config, state, data, and cache roots beneath one directory.
 - Builds use direct argument arrays, isolated caches, and explicit environments.
 - Build, install, profile, pointer, manifest, and resolver publication is atomic.
 - Failed pair creation never replaces the previous selection pointer.
+- Mutating commands fail immediately when a required lock belongs to a live `zm` process. Locks
+  proven to belong to dead processes are removed automatically before the command continues.
 - `zm` inspects prerequisites but never installs system packages or chooses a fallback build
   strategy.
 - Full verification covers immutable data, version output, ELF/runtime metadata, Zig compile/run

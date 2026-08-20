@@ -329,7 +329,6 @@ export class ZlsSourceWorkspace {
       selector,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      wait: {},
     });
     try {
       throwIfAborted(options.signal, `prepare ZLS source '${selector}'`);
@@ -372,7 +371,6 @@ export class ZlsSourceWorkspace {
       selector: cycle,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      wait: {},
     });
     try {
       throwIfAborted(options.signal, `prepare stable ZLS cycle ${cycle}`);
@@ -445,7 +443,6 @@ export class ZlsSourceWorkspace {
       selector: source.requestedSelector,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      wait: {},
     });
     try {
       throwIfAborted(options.signal, "prepare exact ZLS source");

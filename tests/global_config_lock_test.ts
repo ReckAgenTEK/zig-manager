@@ -265,7 +265,7 @@ Deno.test("global config JSON schema is strict, partial, and carries canonical d
 Deno.test("operation lock owner JSON is strict and acquisition is create-new/fail-fast", async () => {
   await withTempRoot(async (root) => {
     const stateRoot = join(root, "state");
-    const manager = lockManager(stateRoot, { isPidAlive: () => false });
+    const manager = lockManager(stateRoot, { isPidAlive: () => true });
     const first = await manager.acquireSource({
       operation: "install latest",
       operationId: UUID_A,
@@ -298,6 +298,8 @@ Deno.test("operation lock owner JSON is strict and acquisition is create-new/fai
       GlobalOperationLockBusyError,
     );
     assertEquals(busy.owner, first.owner);
+    assertStringIncludes(busy.message, "Another zm operation is running");
+    assertStringIncludes(busy.message, "Try again in a few minutes");
     assert(await exists(first.path));
 
     await first.release();
@@ -309,7 +311,7 @@ Deno.test("operation lock owner JSON is strict and acquisition is create-new/fai
 
 Deno.test("concurrent directory-lock acquisition has exactly one owner", async () => {
   await withTempRoot(async (root) => {
-    const manager = lockManager(join(root, "state"), { isPidAlive: () => false });
+    const manager = lockManager(join(root, "state"), { isPidAlive: () => true });
     const attempts = await Promise.allSettled([
       manager.acquireCatalog({ operation: "catalog-a", operationId: UUID_A }),
       manager.acquireCatalog({ operation: "catalog-b", operationId: UUID_B }),
@@ -327,7 +329,7 @@ Deno.test("concurrent directory-lock acquisition has exactly one owner", async (
 
 Deno.test("same-install contention waits within a bound and then acquires for caller recheck", async () => {
   await withTempRoot(async (root) => {
-    const manager = lockManager(join(root, "state"), { isPidAlive: () => false });
+    const manager = lockManager(join(root, "state"), { isPidAlive: () => true });
     const first = await manager.acquireInstall(INSTALL_A, {
       operation: "build first",
       operationId: UUID_A,
@@ -400,13 +402,13 @@ Deno.test("waiting acquisition retries when a released lock disappears during in
   });
 });
 
-Deno.test("install wait timeout and abort retain the existing owner without stale removal", async () => {
+Deno.test("install wait timeout and abort retain the existing live owner", async () => {
   await withTempRoot(async (root) => {
     let livenessCalls = 0;
     const manager = lockManager(join(root, "state"), {
       isPidAlive: () => {
         livenessCalls++;
-        return false;
+        return true;
       },
     });
     const first = await manager.acquireInstall(INSTALL_A, {
@@ -423,7 +425,7 @@ Deno.test("install wait timeout and abort retain the existing owner without stal
       GlobalOperationLockTimeoutError,
     );
     assertEquals(timeout.owner?.operationId, UUID_A);
-    assertEquals(livenessCalls, 0);
+    assert(livenessCalls > 0);
     assertEquals(
       (await manager.inspect({ kind: "install", installationId: INSTALL_A }))?.operationId,
       UUID_A,
@@ -442,14 +444,14 @@ Deno.test("install wait timeout and abort retain the existing owner without stal
       (await manager.inspect({ kind: "install", installationId: INSTALL_A }))?.operationId,
       UUID_A,
     );
-    assertEquals(livenessCalls, 0);
+    assert(livenessCalls > 0);
     await first.release();
   });
 });
 
 Deno.test("scope, source, install, and catalog locks support explicit unbounded waiting", async () => {
   await withTempRoot(async (root) => {
-    const manager = lockManager(join(root, "state"), { isPidAlive: () => false });
+    const manager = lockManager(join(root, "state"), { isPidAlive: () => true });
     const targets = [
       { kind: "scope", scopeKey: SCOPE_A },
       { kind: "source" },
@@ -488,13 +490,13 @@ Deno.test("scope, source, install, and catalog locks support explicit unbounded 
   });
 });
 
-Deno.test("explicit waiting aborts for non-install locks without probing stale owners", async () => {
+Deno.test("explicit waiting aborts while retaining a live owner", async () => {
   await withTempRoot(async (root) => {
     let livenessCalls = 0;
     const manager = lockManager(join(root, "state"), {
       isPidAlive: () => {
         livenessCalls++;
-        return false;
+        return true;
       },
     });
     const owner = await manager.acquireCatalog({
@@ -511,8 +513,31 @@ Deno.test("explicit waiting aborts for non-install locks without probing stale o
     setTimeout(() => controller.abort("stop waiting"), 10);
     await assertRejects(() => waiting, GlobalOperationLockAbortedError);
     assertEquals((await manager.inspect({ kind: "catalog" }))?.operationId, UUID_A);
-    assertEquals(livenessCalls, 0);
+    assert(livenessCalls > 0);
     await owner.release();
+  });
+});
+
+Deno.test("acquisition removes a proven-dead owner and immediately continues", async () => {
+  await withTempRoot(async (root) => {
+    const stateRoot = join(root, "state");
+    const abandoned = lockManager(stateRoot, { isPidAlive: () => true });
+    const first = await abandoned.acquireSource({
+      operation: "cancelled source operation",
+      operationId: UUID_A,
+    });
+    const contender = lockManager(stateRoot, { isPidAlive: () => false });
+
+    const replacement = await contender.acquireSource({
+      operation: "replacement source operation",
+      operationId: UUID_B,
+    });
+
+    assert(replacement.contended);
+    assertEquals(replacement.owner.operationId, UUID_B);
+    assertEquals((await contender.inspect({ kind: "source" }))?.operationId, UUID_B);
+    await assertRejects(() => first.release(), GlobalOperationLockOwnershipLostError);
+    await replacement.release();
   });
 });
 

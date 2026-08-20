@@ -25,7 +25,10 @@ import {
   ZigVersionNotFoundError,
 } from "../src/errors.ts";
 import { DEFAULT_GLOBAL_CONFIG, type GlobalConfig } from "../src/global_config.ts";
-import { GlobalOperationLockManager } from "../src/global_operation_lock.ts";
+import {
+  GlobalOperationLockBusyError,
+  GlobalOperationLockManager,
+} from "../src/global_operation_lock.ts";
 import type { ResolvedSource } from "../src/install_store.ts";
 import {
   SourceWorkspace,
@@ -340,7 +343,7 @@ Deno.test("unsupported derived source version fails explicitly and releases sour
   });
 });
 
-Deno.test("prepareExact preserves metadata and queues safely through the held source callback", async () => {
+Deno.test("prepareExact preserves metadata and rejects a concurrent live owner", async () => {
   const root = await Deno.makeTempDir({ prefix: "zig-source-workspace-exact-" });
   try {
     const cacheRoot = join(root, "cache");
@@ -387,25 +390,23 @@ Deno.test("prepareExact preserves metadata and queues safely through the held so
     assertEquals(callbackOperationId, owner?.operationId);
     const mutations = mutationCalls(fake);
     let queuedCallbackRan = false;
-    const queued = workspace.prepareExact(source, (prepared) => {
-      queuedCallbackRan = true;
-      return prepared.operationId;
-    }, { operation: "queued exact source", scope: "/other/scope" });
-    await delay(10);
+    const busy = await assertRejects(
+      () =>
+        workspace.prepareExact(source, (prepared) => {
+          queuedCallbackRan = true;
+          return prepared.operationId;
+        }, { operation: "concurrent exact source", scope: "/other/scope" }),
+      GlobalOperationLockBusyError,
+    );
+    assertEquals(busy.owner?.operationId, callbackOperationId);
     assertFalse(queuedCallbackRan);
     assertEquals(mutationCalls(fake), mutations);
 
     callbackGate.resolve();
     assertEquals(await running, "0.16.0");
-    const queuedOperationId = await queued;
-    assert(queuedCallbackRan);
-    assert(queuedOperationId !== callbackOperationId);
     assertEquals(await lockManager.inspect({ kind: "source" }), null);
     assertEquals(remoteDiscoveryCalls(fake), 0);
-    assertEquals(progress, [
-      `Preparing exact Zig source at ${COMMIT_A}...\n`,
-      `Preparing exact Zig source at ${COMMIT_A}...\n`,
-    ]);
+    assertEquals(progress, [`Preparing exact Zig source at ${COMMIT_A}...\n`]);
   } finally {
     await cleanup(root);
   }
@@ -782,8 +783,4 @@ async function cleanup(path: string): Promise<void> {
   } catch (cause) {
     if (!(cause instanceof Deno.errors.NotFound)) throw cause;
   }
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }

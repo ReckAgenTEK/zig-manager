@@ -51,6 +51,8 @@ absolute paths for Zig, ZLS, retained source, generated docs, and installed stan
 - Never silently fall back when an explicit managed pointer is corrupt.
 - Never execute prebuilt Zig or ZLS downloads; builds use exact source commits.
 - Never delete final immutable installations through cache cleanup.
+- Never wait behind a live CLI operation or trust a dead process lock; fail live contention and
+  compare-remove only locks whose recorded PID is proven dead.
 - Treat managed installation content as read-only.
 
 ## Supported Host And Deferred Work

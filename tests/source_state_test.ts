@@ -28,7 +28,9 @@ import {
 } from "../src/mod.ts";
 import { buildManagedZig, buildStagingRoot } from "../src/build.ts";
 import {
+  computeScopeOperationLockKey,
   type GlobalOperationLockAcquireOptions,
+  GlobalOperationLockBusyError,
   GlobalOperationLockManager,
   type GlobalOperationLockTarget,
 } from "../src/global_operation_lock.ts";
@@ -240,13 +242,13 @@ Deno.test("failed stable ZLS refresh preserves the effective association and loc
 });
 
 Deno.test("stable Zig advancement gets a distinct stable ZLS association", async () => {
-  await withManager(async ({ manager, sourceRef, runner, project, other }) => {
+  await withManager(async ({ manager, sourceRef, runner, project }) => {
     const first = await manager.use("stable", { path: project });
     sourceRef.refs.push({ kind: "tag", name: "0.16.1", commit: COMMIT_B });
     runner.zigVersion = "0.16.1";
     sourceRef.zlsCalls.length = 0;
 
-    const moved = await manager.use("stable", { path: other });
+    const moved = await manager.update({ path: project });
     assertEquals(moved.commit, COMMIT_B);
     assertEquals(moved.version, "0.16.1");
     assert(moved.installationId !== first.installationId);
@@ -331,20 +333,20 @@ Deno.test("use publishes profile and catalog before writing the scope pin", asyn
   }, events);
 });
 
-Deno.test("remote, build, and verification failures preserve prior pin bytes", async () => {
+Deno.test("update failures preserve prior pin bytes", async () => {
   await withManager(async ({ manager, sourceRef, runner, project }) => {
     await manager.use("0.16");
     const pinPath = join(project, ".zig-manager", "toolchain");
     const prior = await Deno.readTextFile(pinPath);
 
     sourceRef.failRemote = true;
-    await assertRejects(() => manager.use("stable"), Error, "remote unavailable");
+    await assertRejects(() => manager.update(), Error, "remote unavailable");
     assertEquals(await Deno.readTextFile(pinPath), prior);
 
     sourceRef.failRemote = false;
     sourceRef.refs.push({ kind: "tag", name: "0.16.1", commit: COMMIT_B });
     runner.wrongZigVersion = true;
-    await assertRejects(() => manager.use("0.16"), Error, "version");
+    await assertRejects(() => manager.update(), Error, "version");
     assertEquals(await Deno.readTextFile(pinPath), prior);
   });
 });
@@ -888,8 +890,27 @@ Deno.test("data installs survive source, build, and log cache deletion across lo
     const alias = await manager.use("0.16.0", { path: other });
     assertEquals(alias.installationId, used.installationId);
     assertEquals(alias.reused, true);
+    assertEquals(alias.selector, "0.16.0");
     assertEquals(configureCount(), initialConfigureCount);
+    assertEquals(sourceRef.calls, []);
     assertEquals((await manager.run(["version"], { cwd: other })).code, 0);
+  });
+});
+
+Deno.test("use reselects an installed stable profile without Zig source work", async () => {
+  await withManager(async ({ manager, sourceRef, project, other }) => {
+    const first = await manager.use("stable", { path: project });
+    sourceRef.calls.length = 0;
+    sourceRef.zlsCalls.length = 0;
+    sourceRef.failRemote = true;
+    sourceRef.failZlsRemote = true;
+
+    const reused = await manager.use("stable", { path: other });
+
+    assertEquals(reused.profileId, first.profileId);
+    assertEquals(reused.reused, true);
+    assertEquals(sourceRef.calls, []);
+    assertEquals(sourceRef.zlsCalls, []);
   });
 });
 
@@ -1042,7 +1063,33 @@ Deno.test("configure and build start only while the exact installation lock is h
   );
 });
 
-Deno.test("same-scope concurrent use waits and publishes the queued complete pin", async () => {
+Deno.test("use removes a cancelled operation lock whose PID is dead", async () => {
+  await withManager(
+    async ({ manager, project }) => {
+      const abandoned = new GlobalOperationLockManager({
+        stateRoot: manager.paths.stateDir,
+        pid: 4242,
+        isPidAlive: () => true,
+      });
+      await abandoned.acquireScope(await computeScopeOperationLockKey(project), {
+        operation: "cancelled use",
+      });
+
+      const used = await manager.use("0.16", { path: project });
+
+      assertEquals((await manager.current({ path: project })).profileId, used.profileId);
+    },
+    undefined,
+    (paths) => ({
+      locks: new GlobalOperationLockManager({
+        stateRoot: paths.stateDir,
+        isPidAlive: (pid) => pid !== 4242,
+      }),
+    }),
+  );
+});
+
+Deno.test("same-scope concurrent use exits while the first operation is live", async () => {
   const buildStarted = deferred();
   const buildGate = deferred();
   let firstBuild = true;
@@ -1051,19 +1098,17 @@ Deno.test("same-scope concurrent use waits and publishes the queued complete pin
       const first = manager.use("0.16", { path: project });
       await buildStarted.promise;
       const sourceCalls = sourceRef.calls.length;
-      let secondSettled = false;
-      const second = manager.use("0.16.0", { path: project }).finally(() => {
-        secondSettled = true;
-      });
-      await delay(20);
-      assertEquals(secondSettled, false);
+      const busy = await assertRejects(
+        () => manager.use("0.16.0", { path: project }),
+        GlobalOperationLockBusyError,
+      );
+      assertStringIncludes(busy.message, "Another zm operation is running");
       assertEquals(sourceRef.calls.length, sourceCalls);
       buildGate.resolve(undefined);
-      const [firstResult, secondResult] = await Promise.all([first, second]);
-      assertEquals(firstResult.installationId, secondResult.installationId);
+      const firstResult = await first;
       assertEquals(
         await Deno.readTextFile(join(project, ".zig-manager", "toolchain")),
-        serializeScopePin(secondResult.profileId),
+        serializeScopePin(firstResult.profileId),
       );
     },
     undefined,
@@ -1080,7 +1125,7 @@ Deno.test("same-scope concurrent use waits and publishes the queued complete pin
   );
 });
 
-Deno.test("different-scope source operations queue without moving checkout during a build", async () => {
+Deno.test("different-scope source operations exit while source owner is live", async () => {
   const buildStarted = deferred();
   const buildGate = deferred();
   let firstBuild = true;
@@ -1089,17 +1134,16 @@ Deno.test("different-scope source operations queue without moving checkout durin
       const first = manager.use("0.16", { path: project });
       await buildStarted.promise;
       const sourceCalls = sourceRef.calls.length;
-      let secondSettled = false;
-      const second = manager.use("0.16.0", { path: other }).finally(() => {
-        secondSettled = true;
-      });
-      await delay(20);
-      assertEquals(secondSettled, false);
+      const busy = await assertRejects(
+        () => manager.use("0.16.0", { path: other }),
+        GlobalOperationLockBusyError,
+      );
+      assertStringIncludes(busy.message, "Another zm operation is running");
       assertEquals(sourceRef.calls.length, sourceCalls);
       buildGate.resolve(undefined);
-      const [projectResult, otherResult] = await Promise.all([first, second]);
+      const projectResult = await first;
       assertEquals((await manager.current({ path: project })).profileId, projectResult.profileId);
-      assertEquals((await manager.current({ path: other })).profileId, otherResult.profileId);
+      assertEquals((await manager.current({ path: other })).mode, "fallback");
     },
     undefined,
     {

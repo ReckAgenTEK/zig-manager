@@ -256,7 +256,6 @@ export class SourceWorkspace {
       selector,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      wait: {},
     });
     try {
       throwIfAborted(options.signal, `prepare Zig source '${selector}'`);
@@ -300,7 +299,6 @@ export class SourceWorkspace {
       selector: source.requestedSelector,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      wait: {},
     });
     try {
       throwIfAborted(options.signal, "prepare exact Zig source");

@@ -86,6 +86,7 @@ import { type ScopeRegistryInspection, ScopeRegistryStore } from "./scope_regist
 import { SessionShimManager } from "./session_shim.ts";
 import { StableZlsPinStore } from "./stable_zls_pin.ts";
 import { type PreparedSource, SourceWorkspace } from "./source_workspace.ts";
+import { compareZigVersions, parseZigSelector, parseZigTag } from "./versions.ts";
 import { LinuxRuntimeDependencyInspector } from "./runtime_dependencies.ts";
 import { canonicalJson } from "./filesystem.ts";
 import {
@@ -277,6 +278,16 @@ interface InstalledSelection {
   readonly zig: InstalledZigSelection;
   readonly zls: InstalledZlsSelection;
   readonly operationId: string;
+}
+
+type LocalSelectorReuse =
+  | { readonly kind: "profile"; readonly stored: StoredToolchainProfile }
+  | { readonly kind: "selection"; readonly selection: InstalledSelection };
+
+interface LocalSelectorCandidate {
+  readonly metadata: StoredToolchainProfileMetadata;
+  readonly source: ResolvedSource;
+  readonly version: ZigSemanticVersion | null;
 }
 
 interface InstallPreparedPolicy {
@@ -493,7 +504,6 @@ export class ZigManager {
     const sourceLease = await this.#locks.acquireSource({
       operation: `uninstall ${installationId}`,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      wait: {},
     });
     try {
       const operationId = sourceLease.owner.operationId;
@@ -501,14 +511,12 @@ export class ZigManager {
         operation: `uninstall ${installationId}`,
         operationId,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
-        wait: {},
       });
       try {
         const catalogLease = await this.#locks.acquireCatalog({
           operation: `uninstall ${installationId}`,
           operationId,
           ...(options.signal === undefined ? {} : { signal: options.signal }),
-          wait: {},
         });
         try {
           throwIfAborted(options.signal, `uninstall ${installationId}`);
@@ -588,7 +596,22 @@ export class ZigManager {
       const lease = await this.#acquireGlobal(`use ${selector}`, selector, options.signal);
       try {
         const operationId = lease.owner.operationId;
-        const selection = await this.#installSelector(
+        const local = await this.#reuseLocalSelector(selector, options, operationId);
+        if (local?.kind === "profile") {
+          const published = await this.#publishExistingGlobalProfile(
+            local.stored.profile.profileId,
+            `use ${selector}`,
+            operationId,
+            options.signal,
+          );
+          return useResultFromStored(
+            local.stored,
+            { scopeRoot: null, pinPath: published.pinPath },
+            this.#activationRequired(),
+            "global",
+          );
+        }
+        const selection = local?.selection ?? await this.#installSelector(
           selector,
           options,
           this.paths.stateDir,
@@ -617,7 +640,23 @@ export class ZigManager {
     const lease = await this.#acquireScope(scopeRoot, `use ${selector}`, selector, options.signal);
     try {
       const operationId = lease.owner.operationId;
-      const selection = await this.#installSelector(
+      const local = await this.#reuseLocalSelector(selector, options, operationId);
+      if (local?.kind === "profile") {
+        const pin = await this.#publishExistingScopePin(
+          scopeRoot,
+          local.stored.profile.profileId,
+          `use ${selector}`,
+          operationId,
+          options.signal,
+        );
+        return useResultFromStored(
+          local.stored,
+          { scopeRoot, pinPath: pin.pinPath },
+          this.#activationRequired(),
+          "local",
+        );
+      }
+      const selection = local?.selection ?? await this.#installSelector(
         selector,
         options,
         scopeRoot,
@@ -779,7 +818,6 @@ export class ZigManager {
         operation: "remove exact scope pin",
         operationId,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
-        wait: {},
       });
       try {
         const effective = await this.#scopeResolver.resolve(scopeRoot);
@@ -1495,7 +1533,6 @@ export class ZigManager {
     assertBash(shell);
     const lease = await this.#locks.acquireCatalog({
       operation: "install shell resolver shims",
-      wait: {},
     });
     try {
       await this.#shims.install();
@@ -1650,7 +1687,6 @@ export class ZigManager {
           operation: "garbage collect manager staging and caches",
           ...(globalLease === null ? {} : { operationId: globalLease.owner.operationId }),
           ...(options.signal === undefined ? {} : { signal: options.signal }),
-          wait: {},
         });
         try {
           const operationId = sourceLease.owner.operationId;
@@ -1659,7 +1695,6 @@ export class ZigManager {
               operation: "garbage collect unreferenced profiles",
               operationId,
               ...(options.signal === undefined ? {} : { signal: options.signal }),
-              wait: {},
             });
             try {
               await collect(operationId);
@@ -1709,7 +1744,6 @@ export class ZigManager {
           operation: "repair catalog and scope registry",
           operationId,
           ...(options.signal === undefined ? {} : { signal: options.signal }),
-          wait: {},
         });
         try {
           throwIfAborted(options.signal, "repair manager metadata");
@@ -1847,7 +1881,6 @@ export class ZigManager {
           operation: "purge manager-owned roots",
           operationId: globalLease.owner.operationId,
           ...(options.signal === undefined ? {} : { signal: options.signal }),
-          wait: {},
         });
         try {
           const operationId = sourceLease.owner.operationId;
@@ -1855,7 +1888,6 @@ export class ZigManager {
             operation: "purge manager-owned roots",
             operationId,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
-            wait: {},
           });
           try {
             await inspect();
@@ -1916,6 +1948,69 @@ export class ZigManager {
       policy.stableZls ?? "ignore",
     );
     return { zig, zls, operationId: zig.operationId };
+  }
+
+  async #reuseLocalSelector(
+    selector: string,
+    options: UseOptions,
+    operationId: string,
+  ): Promise<LocalSelectorReuse | null> {
+    // Explicit build overrides request a particular recipe, and --refresh-zls explicitly requests
+    // remote discovery. Only the ordinary selector form is eligible for local-first selection.
+    if (
+      options.profile !== undefined || options.jobs !== undefined || options.refreshZls === true
+    ) return null;
+
+    const parsed = selector === "stable" || selector === "latest"
+      ? null
+      : parseZigSelector(selector);
+    const repository = (await this.#config()).zigRepository;
+    const preferHighestVersion = selector === "stable" || parsed?.kind === "minor";
+    const candidates = (await this.#profiles.listMetadata()).flatMap((metadata) => {
+      const profile = metadata.profile;
+      if (
+        !isPairedToolchainProfile(profile) ||
+        canonicalJson(profile.host) !== canonicalJson(this.host) ||
+        profile.source.repository.url !== repository
+      ) return [];
+      const source = localSourceForSelector(selector, profile.source, parsed);
+      if (source === null) return [];
+      return [{ metadata, source, version: parseZigTag(source.version) }];
+    });
+    candidates.sort((left, right) =>
+      compareLocalSelectorCandidates(left, right, preferHighestVersion)
+    );
+    const candidate = candidates[0];
+    if (candidate === undefined) return null;
+
+    let stored: StoredToolchainProfile;
+    try {
+      stored = await this.#getProfile(
+        candidate.metadata.profile.profileId,
+        candidate.metadata.root,
+      );
+    } catch (cause) {
+      if (
+        cause instanceof ZigInstallNotFoundError || cause instanceof ZigInstallCorruptError ||
+        cause instanceof ZigProfileNotFoundError
+      ) return null;
+      throw cause;
+    }
+    if (candidate.source.requestedSelector === stored.profile.source.requestedSelector) {
+      return { kind: "profile", stored };
+    }
+    if (!isPairedToolchainProfile(stored.profile)) return null;
+
+    const zig = await this.#getInstall(stored.profile.components.zig);
+    const zls = await this.#getZlsInstall(stored.profile.components.zls);
+    return {
+      kind: "selection",
+      selection: {
+        zig: { installed: zig, source: candidate.source, reused: true, operationId },
+        zls: { installed: zls, source: stored.profile.zlsSource, reused: true },
+        operationId,
+      },
+    };
   }
 
   async #installZigSelector(
@@ -2006,7 +2101,6 @@ export class ZigManager {
       operationId,
       selector: prepared.source.requestedSelector,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      wait: {},
     });
     try {
       throwIfAborted(options.signal, "install managed Zig");
@@ -2325,7 +2419,6 @@ export class ZigManager {
       operationId,
       selector: prepared.source.requestedSelector,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      wait: {},
     });
     try {
       let corruptCause: unknown = null;
@@ -2514,7 +2607,6 @@ export class ZigManager {
       operation: `publish scope metadata for ${operation}`,
       operationId,
       ...(signal === undefined ? {} : { signal }),
-      wait: {},
     });
     try {
       await this.#installPersistentResolvers(signal);
@@ -2542,7 +2634,6 @@ export class ZigManager {
       operation: `publish paired profile for ${operation}`,
       operationId,
       ...(signal === undefined ? {} : { signal }),
-      wait: {},
     });
     try {
       const profile = await this.#createProfile(selection, operationId, signal);
@@ -2563,7 +2654,6 @@ export class ZigManager {
       operation: `publish global metadata for ${operation}`,
       operationId,
       ...(signal === undefined ? {} : { signal }),
-      wait: {},
     });
     try {
       await this.#installPersistentResolvers(signal);
@@ -2588,7 +2678,6 @@ export class ZigManager {
       operation: `publish legacy scope metadata for ${operation}`,
       operationId,
       ...(signal === undefined ? {} : { signal }),
-      wait: {},
     });
     try {
       await this.#installPersistentResolvers(signal);
@@ -2616,7 +2705,6 @@ export class ZigManager {
       operation: `publish legacy global metadata for ${operation}`,
       operationId,
       ...(signal === undefined ? {} : { signal }),
-      wait: {},
     });
     try {
       await this.#installPersistentResolvers(signal);
@@ -2641,7 +2729,6 @@ export class ZigManager {
       operation: `publish scope metadata for ${operation}`,
       operationId,
       ...(signal === undefined ? {} : { signal }),
-      wait: {},
     });
     try {
       await this.#installPersistentResolvers(signal);
@@ -2664,7 +2751,6 @@ export class ZigManager {
       operation: `publish global metadata for ${operation}`,
       operationId,
       ...(signal === undefined ? {} : { signal }),
-      wait: {},
     });
     try {
       await this.#installPersistentResolvers(signal);
@@ -3083,7 +3169,6 @@ export class ZigManager {
       operation,
       operationId,
       ...(signal === undefined ? {} : { signal }),
-      wait: {},
     });
     try {
       await this.#catalog.rebuild({ operationId, signal });
@@ -3174,7 +3259,6 @@ export class ZigManager {
       scope: scopeRoot,
       ...(selector === undefined ? {} : { selector }),
       ...(signal === undefined ? {} : { signal }),
-      wait: {},
     });
   }
 
@@ -3188,7 +3272,6 @@ export class ZigManager {
       scope: this.paths.globalProfileFile,
       ...(selector === undefined ? {} : { selector }),
       ...(signal === undefined ? {} : { signal }),
-      wait: {},
     });
   }
 
@@ -3884,6 +3967,72 @@ function isZlsProtocolVerifier(
 function isMovingSelector(selector: string): boolean {
   return selector === "latest" || selector === "stable" || selector.startsWith("branch:") ||
     /^[0-9]+\.[0-9]+$/.test(selector);
+}
+
+function localSourceForSelector(
+  selector: string,
+  source: ResolvedSource,
+  parsed: ReturnType<typeof parseZigSelector> | null,
+): ResolvedSource | null {
+  if (source.component !== "zig") return null;
+  if (source.requestedSelector === selector) return source;
+
+  const stableVersion = parseZigTag(source.version);
+  const stableTag = stableVersion !== null && source.resolvedRef.kind === "tag" &&
+    source.resolvedRef.value === stableVersion.text;
+  if (selector === "stable") {
+    return stableTag ? { ...source, requestedSelector: selector } : null;
+  }
+  if (selector === "latest" || parsed === null) return null;
+
+  switch (parsed.kind) {
+    case "exact":
+      return stableTag && stableVersion.text === parsed.value
+        ? { ...source, requestedSelector: selector }
+        : null;
+    case "minor":
+      return stableTag && stableVersion.major === parsed.major &&
+          stableVersion.minor === parsed.minor
+        ? { ...source, requestedSelector: selector }
+        : null;
+    case "tag":
+      return source.resolvedRef.kind === "tag" && source.resolvedRef.value === parsed.value
+        ? { ...source, requestedSelector: selector }
+        : null;
+    case "branch":
+      return (source.resolvedRef.kind === "branch" || source.resolvedRef.kind === "head") &&
+          source.resolvedRef.value === parsed.value
+        ? {
+          ...source,
+          requestedSelector: selector,
+          resolvedRef: { kind: "branch", value: parsed.value },
+        }
+        : null;
+    case "commit":
+      return source.commit === parsed.value
+        ? {
+          ...source,
+          requestedSelector: selector,
+          resolvedRef: { kind: "commit", value: parsed.value },
+        }
+        : null;
+  }
+}
+
+function compareLocalSelectorCandidates(
+  left: LocalSelectorCandidate,
+  right: LocalSelectorCandidate,
+  preferHighestVersion: boolean,
+): number {
+  if (preferHighestVersion && left.version !== null && right.version !== null) {
+    const versionOrder = compareZigVersions(right.version, left.version);
+    if (versionOrder !== 0) return versionOrder;
+  }
+  return right.metadata.profile.createdAt.localeCompare(left.metadata.profile.createdAt) ||
+    right.metadata.profile.source.resolvedAt.localeCompare(
+      left.metadata.profile.source.resolvedAt,
+    ) ||
+    right.metadata.profile.profileId.localeCompare(left.metadata.profile.profileId);
 }
 
 function assertBash(shell: string): void {

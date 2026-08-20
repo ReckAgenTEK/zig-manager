@@ -4,6 +4,15 @@ Notable changes to `@reckagentek/zig-manager` are recorded here.
 
 ## [Unreleased]
 
+## [0.1.0-beta.7] - 2026-08-20
+
+### Fixed
+
+- Make ordinary `use` selector calls reuse matching installed profiles before Zig source resolution
+  or preparation; moving selectors advance only through `update`.
+- Make mutating CLI lock acquisition fail fast for live owners and automatically remove only
+  well-formed locks whose recorded local PID is proven dead.
+
 ## [0.1.0-beta.6] - 2026-08-20
 
 ### Added

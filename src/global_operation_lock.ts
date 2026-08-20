@@ -117,7 +117,15 @@ export class GlobalOperationLockValidationError extends GlobalOperationLockError
 
 export class GlobalOperationLockBusyError extends GlobalOperationLockError {
   constructor(lockPath: string, owner: GlobalOperationLockOwner | null) {
-    super("LOCK_BUSY", `Operation lock is already held: ${lockPath}`, lockPath, owner);
+    super(
+      "LOCK_BUSY",
+      owner === null
+        ? "Another zm operation is running. Try again in a few minutes."
+        : `Another zm operation is running (PID ${owner.pid}: ${owner.operation}). ` +
+          "Try again in a few minutes.",
+      lockPath,
+      owner,
+    );
   }
 }
 
@@ -221,8 +229,9 @@ export class GlobalOperationLock {
 }
 
 /**
- * Manager-state directory locks. Every target is fail-fast unless the caller explicitly requests
- * abortable waiting. Waiting only observes owner metadata and never probes or removes stale owners.
+ * Manager-state directory locks. Contention probes the recorded local PID. Locks owned by a live
+ * process remain authoritative; locks proven to belong to a dead process are removed atomically.
+ * Every target is fail-fast unless the caller explicitly requests abortable waiting.
  */
 export class GlobalOperationLockManager {
   readonly stateRoot: string;
@@ -307,6 +316,17 @@ export class GlobalOperationLockManager {
       contended = true;
       lastOwner = await this.#inspectWithIncompleteRetry(target);
       if (lastOwner === null) continue;
+      if (!await this.#ownerIsAlive(lastOwner, lockPath)) {
+        try {
+          await this.#removeOwned(target, lastOwner.operationId);
+        } catch (cause) {
+          // Release or replacement between inspection and compare-remove is harmless. Retry the
+          // create/inspect cycle without touching the new owner.
+          if (cause instanceof GlobalOperationLockOwnershipLostError) continue;
+          throw cause;
+        }
+        continue;
+      }
       if (wait === undefined) throw new GlobalOperationLockBusyError(lockPath, lastOwner);
 
       const elapsed = finiteNumber(this.#monotonicNow(), "monotonicNow()") - waitStarted;
@@ -444,20 +464,27 @@ export class GlobalOperationLockManager {
   }
 
   /**
-   * Explicit stale-lock removal. Malformed owners are retained, and a live/unknown local PID is
-   * never unlocked. Normal owners should release their lease instead.
+   * Explicit lock removal. Malformed owners are retained, and a live/unknown local PID is never
+   * unlocked. Acquisition already removes well-formed locks proven to have dead owners.
    */
   async unlock(targetValue: GlobalOperationLockTarget): Promise<boolean> {
     const target = validateTarget(targetValue);
     const lockPath = this.pathFor(target);
     const owner = await this.#inspectWithIncompleteRetry(target);
     if (owner === null) return false;
-    let alive: boolean;
+    const alive = await this.#ownerIsAlive(owner, lockPath);
+    if (alive) throw new GlobalOperationLockOwnerAliveError(lockPath, owner);
+    await this.#removeOwned(target, owner.operationId);
+    return true;
+  }
+
+  async #ownerIsAlive(owner: GlobalOperationLockOwner, lockPath: string): Promise<boolean> {
     try {
-      alive = await this.#isPidAlive(owner.pid);
+      const alive = await this.#isPidAlive(owner.pid);
       if (typeof alive !== "boolean") {
         throw new TypeError("PID liveness probe did not return a boolean");
       }
+      return alive;
     } catch (cause) {
       throw new GlobalOperationLockError(
         "LOCK_IO",
@@ -467,9 +494,6 @@ export class GlobalOperationLockManager {
         { cause },
       );
     }
-    if (alive) throw new GlobalOperationLockOwnerAliveError(lockPath, owner);
-    await this.#removeOwned(target, owner.operationId);
-    return true;
   }
 
   async #ensureParent(target: GlobalOperationLockTarget): Promise<void> {

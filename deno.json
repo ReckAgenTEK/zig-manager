@@ -1,6 +1,6 @@
 {
   "name": "@reckagentek/zig-manager",
-  "version": "0.1.0-beta.6",
+  "version": "0.1.0-beta.7",
   "license": "MIT",
   "exports": {
     ".": "./src/mod.ts",

@@ -39,21 +39,23 @@ limits both the Zig and ZLS builds. ZLS is always included; `--refresh-zls` cont
 discovery rather than opting into ZLS.
 
 The first use of a stable Zig installation chooses the newest compatible strict ZLS tag in the same
-major/minor cycle and records that choice in a manager-wide stable-ZLS pin. Later stable uses still
-resolve Zig normally. If they select that exact Zig installation, `zm` reuses and fully verifies the
-pinned ZLS without ZLS remote or source work. `--refresh-zls` forces discovery of the newest
-compatible stable ZLS and replaces the stable-ZLS pin only after the new pair builds and verifies
-successfully.
+major/minor cycle and records that choice in a manager-wide stable-ZLS pin. Later stable uses select
+the newest matching installed profile without Zig or ZLS remote/source work. `update` re-resolves
+the moving Zig selector. `--refresh-zls` forces discovery of the newest compatible stable ZLS and
+replaces the stable-ZLS pin only after the new pair builds and verifies successfully.
 
 Development selectors use literal ZLS remote HEAD and require the source-declared release cycle to
 match Zig. The exact managed Zig then builds and verifies ZLS. Any failure occurs before pointer
 publication.
 
 `install` creates or reuses both immutable installations and their profile without selecting it.
-`use` performs the same work and publishes the local or global pointer last. `use --installed`
-accepts a paired profile ID or a Zig installation ID and remains fully remote- and source-free.
-Selecting an old Zig-only installation preserves its strict legacy profile rather than borrowing an
-unrelated ZLS. A ZLS installation ID cannot define a selection by itself.
+`use` first selects the newest matching installed profile; only a cache miss performs source work.
+Exact, minor, stable, tag, branch, and commit aliases can reuse the same installed Zig while
+preserving the requested selector in a new immutable profile. Explicit build options and
+`--refresh-zls` bypass this local-first path. `use --installed` accepts a paired profile ID or a Zig
+installation ID and remains fully remote- and source-free. Selecting an old Zig-only installation
+preserves its strict legacy profile rather than borrowing an unrelated ZLS. A ZLS installation ID
+cannot define a selection by itself.
 
 `sync` reproduces and verifies the exact stored sources. `update` re-resolves only a moving
 selector; for `stable`, it reuses an existing exact-Zig stable-ZLS pin unless Zig advances. Use
@@ -122,10 +124,15 @@ are uncertain; the global profile is a retained reference.
 an invalid global pointer, and reconciles the selected exact local pin. Unlock targets are `source`,
 `catalog`, `global`, `scope`, or `install:<installation-id>`.
 
+Mutating CLI commands never wait behind a required operation lock. `zm` checks the recorded local
+PID: a live owner returns `Another zm operation is running` immediately, while a lock proven to
+belong to a dead process is compare-removed and acquisition continues. Malformed owners and PID
+checks with unknown results remain locked; `repair --unlock` is the explicit recovery path.
+
 `purge --yes` removes owned persistent resolvers and manager-owned XDG roots. It never removes the
 Deno `zm` launcher, external executables, or directory pins outside manager roots. Such pins become
 dangling and are reported. `purge --dry-run` performs no mutation.
 
-The first `SIGINT` or `SIGTERM` aborts lock waits and children, unwinds owned staging and locks,
-then re-raises the signal. A second signal terminates immediately. Failed build logs remain until an
-explicit `gc --build-cache`.
+The first `SIGINT` or `SIGTERM` aborts children and any explicit library lock wait, unwinds owned
+staging and locks, then re-raises the signal. A second signal terminates immediately. Failed build
+logs remain until an explicit `gc --build-cache`.
