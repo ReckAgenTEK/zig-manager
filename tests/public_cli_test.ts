@@ -196,6 +196,8 @@ Deno.test("CLI parses build and ZLS refresh options and emits activation reminde
       "--jobs",
       "7",
       "--refresh-zls",
+      "--verify",
+      "--clean",
     ],
     output.io,
     () => fake,
@@ -203,7 +205,14 @@ Deno.test("CLI parses build and ZLS refresh options and emits activation reminde
   assertEquals(fake.calls, [{
     method: "use",
     selector: "stable",
-    options: { path: "/scope", profile: "debug", jobs: 7, refreshZls: true },
+    options: {
+      path: "/scope",
+      profile: "debug",
+      jobs: 7,
+      clean: true,
+      refreshZls: true,
+      verify: true,
+    },
   }]);
   assertStringIncludes(output.stdout(), "/scope");
   assertStringIncludes(output.stdout(), "zig: 0.16.0");

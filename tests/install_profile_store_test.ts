@@ -350,6 +350,35 @@ Deno.test("install inspection classifies corruption and explicit quarantine pres
   });
 });
 
+Deno.test("explicit clean replacement can restore or discard its exact backup", async () => {
+  await withTempRoot(async (root) => {
+    const store = new InstallStore(join(root, "data"));
+    const installed = await publishPrepared(store, "zig");
+    const first = await store.quarantine(
+      "zig",
+      installed.manifest.installationId,
+      "11111111-1111-4111-8111-111111111111",
+      "replace",
+    );
+
+    await store.restoreQuarantine(first);
+    assertEquals(
+      (await store.get("zig", installed.manifest.installationId)).manifest,
+      installed.manifest,
+    );
+
+    const second = await store.quarantine(
+      "zig",
+      installed.manifest.installationId,
+      "22222222-2222-4222-8222-222222222222",
+      "replace",
+    );
+    await store.discardQuarantine(second);
+    assertEquals(await pathExists(installed.root), false);
+    assertEquals(await pathExists(second.quarantinePath), false);
+  });
+});
+
 Deno.test("profile store strictly reads published v1 profiles with optional ZLS", async () => {
   await withTempRoot(async (root) => {
     const dataRoot = join(root, "data");

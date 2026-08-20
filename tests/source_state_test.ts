@@ -914,6 +914,41 @@ Deno.test("use reselects an installed stable profile without Zig source work", a
   });
 });
 
+Deno.test("use trusts installed profile metadata unless verification is requested", async () => {
+  await withManager(async ({ manager, project, other }) => {
+    const first = await manager.use("0.16.0", { path: project });
+    await Deno.remove(first.executable);
+
+    const reused = await manager.use("0.16.0", { path: other });
+    assertEquals(reused.profileId, first.profileId);
+    assertEquals(reused.reused, true);
+
+    await assertRejects(
+      () => manager.use("0.16.0", { path: other, verify: true }),
+      ZigInstallCorruptError,
+    );
+  });
+});
+
+Deno.test("use --clean replaces corrupt Zig and healthy ZLS from exact source", async () => {
+  await withManager(async ({ manager, runner, project, other }) => {
+    const first = await manager.use("0.16.0", { path: project });
+    const configureCount = () =>
+      runner.requests.filter((request) => request.args[0] === "-S").length;
+    const initialConfigureCount = configureCount();
+    await Deno.writeTextFile(first.executable, "corrupt Zig\n");
+
+    const cleaned = await manager.use("0.16.0", { path: other, clean: true });
+
+    assertEquals(cleaned.profileId, first.profileId);
+    assertEquals(cleaned.installationId, first.installationId);
+    assertEquals(cleaned.zls?.installationId, first.zls?.installationId);
+    assertEquals(cleaned.reused, false);
+    assert(configureCount() > initialConfigureCount);
+    await manager.use("0.16.0", { path: other, verify: true });
+  });
+});
+
 Deno.test("sync rebuilds a missing exact install without changing its pin", async () => {
   await withManager(async ({ manager, project }) => {
     const used = await manager.use("0.16");
@@ -1219,7 +1254,7 @@ Deno.test("abort after catalog completion preserves exact prior pin bytes", asyn
       const prior = await Deno.readFile(first.pinPath);
       abortCatalog = true;
       const error = await assertRejects(
-        () => manager.use("0.16.0", { signal: controller.signal }),
+        () => manager.use("0.16.0", { profile: "release", signal: controller.signal }),
         ZigOperationAbortedError,
       );
       assertEquals(controller.signal.reason, "catalog complete");
@@ -1545,6 +1580,7 @@ function recordingServices(paths: PlatformPaths, events?: string[]): ZigManagerS
         return result;
       },
       get: (id) => profiles.get(id),
+      select: (id) => profiles.select(id),
       tryGet: (id) => profiles.tryGet(id),
       read: (id) => profiles.read(id),
       list: () => profiles.list(),

@@ -697,24 +697,28 @@ export class InstallStore {
 
   /**
    * Atomically preserve one exact final object under manager-owned quarantine. The caller must
-   * explicitly authorize either a previously corrupt object or an object created by its operation.
+   * explicitly authorize a corrupt object, an explicit replacement, or an object created by its
+   * operation.
    */
   async quarantine(
     component: InstallComponent,
     installationId: string,
     operationId: string,
-    authorization: "corrupt" | "created",
+    authorization: "corrupt" | "created" | "replace",
     signal?: AbortSignal,
   ): Promise<QuarantinedInstall> {
     throwIfAborted(signal, "quarantine immutable installation", this.installsRoot);
     const validatedComponent = validateInstallComponent(component);
     const validatedId = validateInstallationId(installationId);
     const validatedOperationId = operationSegment(operationId);
-    if (authorization !== "corrupt" && authorization !== "created") {
+    if (
+      authorization !== "corrupt" && authorization !== "created" &&
+      authorization !== "replace"
+    ) {
       throw new InstallStoreError("INSTALL_INVALID", "Install quarantine requires authorization");
     }
     const sourcePath = this.installationPath(validatedComponent, validatedId);
-    if (authorization === "corrupt") {
+    if (authorization === "corrupt" || authorization === "replace") {
       const inspection = await this.inspect(validatedComponent, validatedId);
       throwIfAborted(signal, "quarantine immutable installation", sourcePath);
       if (inspection.state === "missing") {
@@ -764,6 +768,79 @@ export class InstallStore {
       quarantinePath,
       operationId: validatedOperationId,
     };
+  }
+
+  /** Restore one exact quarantined installation when an explicit clean replacement fails. */
+  async restoreQuarantine(
+    quarantined: QuarantinedInstall,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const paths = this.#quarantinePaths(quarantined);
+    throwIfAborted(signal, "restore quarantined installation", paths.quarantinePath);
+    if (await pathExists(paths.sourcePath)) {
+      throw new InstallStoreError(
+        "INSTALL_CONFLICT",
+        `Cannot restore quarantine over an existing installation: ${paths.sourcePath}`,
+        paths,
+      );
+    }
+    try {
+      await Deno.rename(paths.quarantinePath, paths.sourcePath);
+    } catch (cause) {
+      throw new InstallStoreError(
+        "INSTALL_PATH_INVALID",
+        `Unable to restore quarantined installation: ${paths.quarantinePath}`,
+        paths,
+        { cause },
+      );
+    }
+  }
+
+  /** Permanently discard one exact quarantined installation after successful replacement. */
+  async discardQuarantine(
+    quarantined: QuarantinedInstall,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const paths = this.#quarantinePaths(quarantined);
+    throwIfAborted(signal, "discard quarantined installation", paths.quarantinePath);
+    try {
+      const info = await Deno.lstat(paths.quarantinePath);
+      await Deno.remove(paths.quarantinePath, {
+        recursive: info.isDirectory && !info.isSymlink,
+      });
+    } catch (cause) {
+      if (cause instanceof Deno.errors.NotFound) return;
+      throw new InstallStoreError(
+        "INSTALL_PATH_INVALID",
+        `Unable to discard quarantined installation: ${paths.quarantinePath}`,
+        paths,
+        { cause },
+      );
+    }
+  }
+
+  #quarantinePaths(quarantined: QuarantinedInstall): {
+    readonly sourcePath: string;
+    readonly quarantinePath: string;
+  } {
+    const component = validateInstallComponent(quarantined.component);
+    const installationId = validateInstallationId(quarantined.installationId);
+    const operationId = operationSegment(quarantined.operationId);
+    const sourcePath = this.installationPath(component, installationId);
+    const componentRoot = join(this.corruptRoot, component);
+    const quarantinePath = join(componentRoot, `${installationId}-${operationId}`);
+    if (
+      resolve(quarantined.sourcePath) !== sourcePath ||
+      resolve(quarantined.quarantinePath) !== quarantinePath
+    ) {
+      throw new InstallStoreError(
+        "INSTALL_PATH_INVALID",
+        "Quarantined installation paths do not match their exact identity",
+        { sourcePath, quarantinePath },
+      );
+    }
+    assertPathContained(componentRoot, quarantinePath);
+    return { sourcePath, quarantinePath };
   }
 
   async list(): Promise<readonly InstalledObject[]> {

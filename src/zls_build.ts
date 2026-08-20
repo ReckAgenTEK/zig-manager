@@ -100,6 +100,7 @@ export interface BuildManagedZlsInput {
   readonly logRoot: string;
   readonly operationId?: string;
   readonly progress?: (message: string) => void | Promise<void>;
+  readonly clean?: boolean;
   readonly signal?: AbortSignal;
 }
 
@@ -237,6 +238,9 @@ export async function buildManagedZls(
   assertOwnedLog(logBase, logRoot, operationId, installationId);
   await ensurePhysicalDirectory(componentRoot);
 
+  if (input.clean === true && await pathExists(finalRoot)) {
+    await removeReplaceableCacheObject(componentRoot, finalRoot);
+  }
   if (await pathExists(finalRoot)) {
     try {
       const manifest = await readZlsBuildManifest(finalManifestPath);

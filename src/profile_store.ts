@@ -519,6 +519,16 @@ export class ToolchainProfileStore {
     return { root, manifestPath, profile, ...paths };
   }
 
+  /** Read immutable profile metadata and stored executable paths without verifying installations. */
+  async select(profileId: string): Promise<StoredToolchainProfile> {
+    const metadata = await this.getMetadata(profileId);
+    const zigPath = await readTrustedPath(join(metadata.root, "zig.path"));
+    const zlsPath = metadata.profile.components.zls === null
+      ? null
+      : await readTrustedPath(join(metadata.root, "zls.path"));
+    return { ...metadata, zigPath, zlsPath };
+  }
+
   /** Read and hash-validate immutable profile metadata without requiring its installation. */
   async read(profileId: string): Promise<ToolchainProfile> {
     return (await this.getMetadata(profileId)).profile;

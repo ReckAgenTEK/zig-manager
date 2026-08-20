@@ -21,7 +21,7 @@ remain readable, but they never borrow an unrelated ZLS.
 ```bash
 deno install --global --name zm \
   --allow-env --allow-read --allow-write --allow-run --allow-sys \
-  jsr:@reckagentek/zig-manager@0.1.0-beta.7/cli
+  jsr:@reckagentek/zig-manager@0.1.0-beta.8/cli
 ```
 
 Check the host without resolving a source:
@@ -180,6 +180,23 @@ zm use stable
 zm use 0.16
 zm use 0.16.0
 ```
+
+This fast path trusts immutable profile metadata and writes the selection pointer without hashing
+installations or launching Zig/ZLS. Add `--verify` when full verification is wanted:
+
+```bash
+zm use 0.16.0 --verify
+```
+
+Use `--clean` to discard matching Zig/ZLS build and installation outputs and rebuild the exact pair
+completely from source:
+
+```bash
+zm use 0.16.0 --clean
+```
+
+If a clean rebuild fails, a previously healthy installation is restored instead of leaving the
+selected profile broken.
 
 To select one exact profile or disambiguate profiles sharing a Zig installation ID:
 

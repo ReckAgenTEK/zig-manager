@@ -9,7 +9,7 @@ zm shell status [-g|--global|--path <directory>]
 
 zm install <selector> [--profile <profile>] [--jobs <count>]
 zm uninstall <installation-id>
-zm use <selector> [-g|--global|--path <directory>] [--refresh-zls] [--codex-skills] [build options]
+zm use <selector> [-g|--global|--path <directory>] [--verify] [--clean] [--refresh-zls] [--codex-skills] [build options]
 zm use --installed <profile-or-zig-installation-id> [-g|--global|--path <directory>] [--codex-skills]
 zm unuse [-g|--global|--path <directory>]
 zm sync [-g|--global|--path <directory>] [build options]
@@ -50,12 +50,15 @@ publication.
 
 `install` creates or reuses both immutable installations and their profile without selecting it.
 `use` first selects the newest matching installed profile; only a cache miss performs source work.
-Exact, minor, stable, tag, branch, and commit aliases can reuse the same installed Zig while
-preserving the requested selector in a new immutable profile. Explicit build options and
-`--refresh-zls` bypass this local-first path. `use --installed` accepts a paired profile ID or a Zig
-installation ID and remains fully remote- and source-free. Selecting an old Zig-only installation
-preserves its strict legacy profile rather than borrowing an unrelated ZLS. A ZLS installation ID
-cannot define a selection by itself.
+The default installed-profile path trusts immutable profile metadata and does not hash installations
+or launch Zig/ZLS. `--verify` opts into full verification before selection. `--clean` discards
+matching Zig/ZLS build and installation outputs and rebuilds the exact stored pair from source; a
+healthy prior installation is restored if rebuilding fails. Exact, minor, stable, tag, branch, and
+commit aliases can select the same matching profile. Explicit build options and `--refresh-zls`
+bypass this local-first path. `use --installed` accepts a paired profile ID or a Zig installation ID
+and remains fully remote- and source-free. Selecting an old Zig-only installation preserves its
+strict legacy profile rather than borrowing an unrelated ZLS. A ZLS installation ID cannot define a
+selection by itself.
 
 `sync` reproduces and verifies the exact stored sources. `update` re-resolves only a moving
 selector; for `stable`, it reuses an existing exact-Zig stable-ZLS pin unless Zig advances. Use

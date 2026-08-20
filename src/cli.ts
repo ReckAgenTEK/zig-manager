@@ -142,18 +142,23 @@ export async function runCliDetailed(
         const values = parseOptions(
           parsed.args.slice(1),
           ["--installed", "--path", "--profile", "--jobs"],
-          ["--global", "-g", "--refresh-zls", "--codex-skills"],
+          ["--global", "-g", "--refresh-zls", "--codex-skills", "--verify", "--clean"],
         );
         const scope = scopeOptions(values, signal);
         const installed = value(values, "--installed");
         const refreshZls = values.flags.has("--refresh-zls");
+        const verify = values.flags.has("--verify");
+        const clean = values.flags.has("--clean");
         const codexSkills = values.flags.has("--codex-skills");
         if (codexSkills && scope.global === true) {
           throw new ZigInvalidArgumentError("use --codex-skills requires a local directory scope");
         }
         let result: ZigUseResult;
         if (installed !== undefined) {
-          if (values.positionals.length !== 0 || hasBuildOptions(values) || refreshZls) {
+          if (
+            values.positionals.length !== 0 || hasBuildOptions(values) || refreshZls || verify ||
+            clean
+          ) {
             throw new ZigInvalidArgumentError(
               "use --installed accepts only a profile ID or Zig installation ID and one scope option",
             );
@@ -168,6 +173,8 @@ export async function runCliDetailed(
             ...buildOptions(values, signal),
             ...scope,
             ...(refreshZls ? { refreshZls: true } : {}),
+            ...(verify ? { verify: true } : {}),
+            ...(clean ? { clean: true } : {}),
           });
         }
         const codexSkill = codexSkills
@@ -961,7 +968,7 @@ Usage:
   zm shell deactivate bash
   zm shell status [-g|--global|--path <directory>] [--json]
   zm install <selector> [--profile <profile>] [--jobs <count>] [--json]
-  zm use <selector> [-g|--global|--path <directory>] [--refresh-zls] [--codex-skills] [build options] [--json]
+  zm use <selector> [-g|--global|--path <directory>] [--verify] [--clean] [--refresh-zls] [--codex-skills] [build options] [--json]
   zm use --installed <profile-or-zig-installation-id> [-g|--global|--path <directory>] [--codex-skills] [--json]
   zm unuse [-g|--global|--path <directory>] [--json]
   zm sync [-g|--global|--path <directory>] [build options] [--json]

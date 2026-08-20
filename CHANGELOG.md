@@ -4,6 +4,15 @@ Notable changes to `@reckagentek/zig-manager` are recorded here.
 
 ## [Unreleased]
 
+## [0.1.0-beta.8] - 2026-08-20
+
+### Fixed
+
+- Make installed-profile `use` selection metadata-only by default; `--verify` explicitly enables
+  full Zig/ZLS installation verification.
+- Add `zm use <selector> --clean` to replace exact Zig/ZLS build and installation outputs from
+  source while restoring a healthy prior installation when rebuilding fails.
+
 ## [0.1.0-beta.7] - 2026-08-20
 
 ### Fixed

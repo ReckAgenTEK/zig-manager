@@ -89,6 +89,9 @@ export async function buildManagedZig(context: ManagedBuildContext): Promise<Bui
   assertLogOwnership(logsBase, logRoot, operationId, identity);
   await ensurePhysicalBuildParent(parent);
   throwIfAborted(context.options.signal, "build managed Zig");
+  if (context.options.clean === true && await pathExists(finalRoot)) {
+    await removeReplaceableBuildObject(parent, finalRoot, context.options.signal);
+  }
   if (await pathExists(finalRoot)) {
     try {
       const manifest = await readBuildManifest(finalManifestPath);

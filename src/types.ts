@@ -562,6 +562,8 @@ export interface OperationOptions {
 export interface BuildOptions extends OperationOptions {
   readonly profile?: ZigBuildProfile;
   readonly jobs?: number;
+  /** Discard matching build/install outputs and rebuild them from source. */
+  readonly clean?: boolean;
 }
 
 export interface InstallOptions extends BuildOptions {}
@@ -580,6 +582,8 @@ export interface ScopedBuildOptions extends BuildOptions {
 
 export interface UseOptions extends ScopedBuildOptions {
   readonly refreshZls?: boolean;
+  /** Fully verify a reused installed profile before selecting it. */
+  readonly verify?: boolean;
 }
 
 export interface CurrentOptions extends ScopeOperationOptions {

@@ -48,8 +48,11 @@ import {
 } from "./install_pipeline.ts";
 import {
   computeInstallationId,
+  type InstallComponent,
   type InstalledObject,
+  type InstallInspection,
   InstallStore,
+  type QuarantinedInstall,
   type ResolvedSource,
   type RuntimeDependencyInspector,
   type StoredInstallMetadata,
@@ -184,6 +187,8 @@ type InstallStoreService = Pick<
   | "publish"
   | "inspect"
   | "quarantine"
+  | "restoreQuarantine"
+  | "discardQuarantine"
   | "remove"
 >;
 type ProfileStoreService = Pick<
@@ -191,6 +196,7 @@ type ProfileStoreService = Pick<
   | "stagingRoot"
   | "create"
   | "get"
+  | "select"
   | "tryGet"
   | "read"
   | "list"
@@ -280,14 +286,15 @@ interface InstalledSelection {
   readonly operationId: string;
 }
 
-type LocalSelectorReuse =
-  | { readonly kind: "profile"; readonly stored: StoredToolchainProfile }
-  | { readonly kind: "selection"; readonly selection: InstalledSelection };
-
 interface LocalSelectorCandidate {
   readonly metadata: StoredToolchainProfileMetadata;
   readonly source: ResolvedSource;
   readonly version: ZigSemanticVersion | null;
+}
+
+interface CleanInstallBackup {
+  readonly quarantined: QuarantinedInstall;
+  readonly restoreOnFailure: boolean;
 }
 
 interface InstallPreparedPolicy {
@@ -597,21 +604,26 @@ export class ZigManager {
       try {
         const operationId = lease.owner.operationId;
         const local = await this.#reuseLocalSelector(selector, options, operationId);
-        if (local?.kind === "profile") {
+        if (local !== null) {
+          if (options.clean === true) {
+            await this.#cleanStoredProfile(local, options, this.paths.stateDir, operationId);
+          }
           const published = await this.#publishExistingGlobalProfile(
-            local.stored.profile.profileId,
+            local.profile.profileId,
             `use ${selector}`,
             operationId,
             options.signal,
           );
           return useResultFromStored(
-            local.stored,
+            local,
             { scopeRoot: null, pinPath: published.pinPath },
             this.#activationRequired(),
             "global",
+            selector,
+            options.clean !== true,
           );
         }
-        const selection = local?.selection ?? await this.#installSelector(
+        const selection = await this.#installSelector(
           selector,
           options,
           this.paths.stateDir,
@@ -641,22 +653,27 @@ export class ZigManager {
     try {
       const operationId = lease.owner.operationId;
       const local = await this.#reuseLocalSelector(selector, options, operationId);
-      if (local?.kind === "profile") {
+      if (local !== null) {
+        if (options.clean === true) {
+          await this.#cleanStoredProfile(local, options, scopeRoot, operationId);
+        }
         const pin = await this.#publishExistingScopePin(
           scopeRoot,
-          local.stored.profile.profileId,
+          local.profile.profileId,
           `use ${selector}`,
           operationId,
           options.signal,
         );
         return useResultFromStored(
-          local.stored,
+          local,
           { scopeRoot, pinPath: pin.pinPath },
           this.#activationRequired(),
           "local",
+          selector,
+          options.clean !== true,
         );
       }
-      const selection = local?.selection ?? await this.#installSelector(
+      const selection = await this.#installSelector(
         selector,
         options,
         scopeRoot,
@@ -1954,7 +1971,7 @@ export class ZigManager {
     selector: string,
     options: UseOptions,
     operationId: string,
-  ): Promise<LocalSelectorReuse | null> {
+  ): Promise<StoredToolchainProfile | null> {
     // Explicit build overrides request a particular recipe, and --refresh-zls explicitly requests
     // remote discovery. Only the ordinary selector form is eligible for local-first selection.
     if (
@@ -1985,7 +2002,7 @@ export class ZigManager {
 
     let stored: StoredToolchainProfile;
     try {
-      stored = await this.#getProfile(
+      stored = await this.#selectProfile(
         candidate.metadata.profile.profileId,
         candidate.metadata.root,
       );
@@ -1996,21 +2013,39 @@ export class ZigManager {
       ) return null;
       throw cause;
     }
-    if (candidate.source.requestedSelector === stored.profile.source.requestedSelector) {
-      return { kind: "profile", stored };
+    if (options.verify === true && options.clean !== true) {
+      await this.#fullyVerifyProfile(stored, options.signal, operationId);
     }
-    if (!isPairedToolchainProfile(stored.profile)) return null;
+    return stored;
+  }
 
-    const zig = await this.#getInstall(stored.profile.components.zig);
-    const zls = await this.#getZlsInstall(stored.profile.components.zls);
-    return {
-      kind: "selection",
-      selection: {
-        zig: { installed: zig, source: candidate.source, reused: true, operationId },
-        zls: { installed: zls, source: stored.profile.zlsSource, reused: true },
-        operationId,
-      },
-    };
+  async #cleanStoredProfile(
+    stored: StoredToolchainProfile,
+    options: UseOptions,
+    scope: string,
+    operationId: string,
+  ): Promise<void> {
+    if (!isPairedToolchainProfile(stored.profile)) {
+      throw new ZigProfileInvalidError(
+        stored.profile.profileId,
+        "clean selector reuse requires a paired Zig/ZLS profile",
+      );
+    }
+    const zig = await this.#syncExactZig(
+      stored.profile.source,
+      stored.profile.components.zig,
+      options,
+      scope,
+      operationId,
+    );
+    await this.#syncExactZls(
+      stored.profile.zlsSource,
+      stored.profile.components.zls,
+      zig.selection.installed,
+      options,
+      scope,
+      operationId,
+    );
   }
 
   async #installZigSelector(
@@ -2102,11 +2137,19 @@ export class ZigManager {
       selector: prepared.source.requestedSelector,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
+    let cleanBackup: CleanInstallBackup | null = null;
     try {
       throwIfAborted(options.signal, "install managed Zig");
       let corruptCause: unknown = null;
       const inspection = await this.#installs.inspect("zig", installationId);
-      if (inspection.state === "healthy") {
+      if (options.clean === true) {
+        cleanBackup = await this.#beginCleanReplacement(
+          "zig",
+          installationId,
+          inspection,
+          options.signal,
+        );
+      } else if (inspection.state === "healthy") {
         try {
           const reused = await reuseInstalledZig({
             recipe: preparedRecipe.recipe,
@@ -2196,12 +2239,17 @@ export class ZigManager {
         signal: options.signal,
       });
       throwIfAborted(options.signal, "install managed Zig");
+      const completedBackup = cleanBackup;
+      cleanBackup = null;
+      await this.#discardCleanReplacement(completedBackup, options.signal);
       return {
         installed,
         source: prepared.source,
         reused: installed.reused,
         operationId,
       };
+    } catch (cause) {
+      return await this.#rollbackCleanReplacement(cleanBackup, cause);
     } finally {
       await lease.release();
     }
@@ -2214,6 +2262,7 @@ export class ZigManager {
     stablePolicy: "ignore" | "prefer" | "refresh" = "ignore",
   ): Promise<InstalledZlsSelection> {
     if (
+      options.clean !== true &&
       stablePolicy === "prefer" &&
       zig.source.requestedSelector === "stable"
     ) {
@@ -2420,10 +2469,18 @@ export class ZigManager {
       selector: prepared.source.requestedSelector,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
+    let cleanBackup: CleanInstallBackup | null = null;
     try {
       let corruptCause: unknown = null;
       const inspection = await this.#installs.inspect("zls", installationId);
-      if (inspection.state === "healthy") {
+      if (options.clean === true) {
+        cleanBackup = await this.#beginCleanReplacement(
+          "zls",
+          installationId,
+          inspection,
+          options.signal,
+        );
+      } else if (inspection.state === "healthy") {
         let reused: InstalledObject | null = null;
         try {
           reused = await this.#reuseInstalledZls({
@@ -2478,6 +2535,7 @@ export class ZigManager {
         logRoot: join(this.paths.logsDir, "zls"),
         operationId,
         progress: this.#progress,
+        clean: options.clean,
         signal: options.signal,
       });
       throwIfAborted(options.signal, "install managed ZLS");
@@ -2499,8 +2557,13 @@ export class ZigManager {
         source: recipeSource,
         reused: installed.reused,
       };
+      const completedBackup = cleanBackup;
+      cleanBackup = null;
+      await this.#discardCleanReplacement(completedBackup, options.signal);
       await policy.onVerified?.(selection);
       return selection;
+    } catch (cause) {
+      return await this.#rollbackCleanReplacement(cleanBackup, cause);
     } finally {
       await lease.release();
     }
@@ -2754,8 +2817,6 @@ export class ZigManager {
     });
     try {
       await this.#installPersistentResolvers(signal);
-      await this.#getProfile(profileId, this.paths.globalProfileFile);
-      await this.#catalog.rebuild({ operationId, signal });
       throwIfAborted(signal, `publish global profile pointer for ${operation}`);
       const pointer = await this.#globalProfile.write(profileId);
       return { pinPath: pointer.pointerPath };
@@ -2884,6 +2945,52 @@ export class ZigManager {
     }
   }
 
+  async #beginCleanReplacement(
+    component: InstallComponent,
+    installationId: string,
+    inspection: InstallInspection,
+    signal?: AbortSignal,
+  ): Promise<CleanInstallBackup | null> {
+    if (inspection.state === "missing") return null;
+    return {
+      quarantined: await this.#installs.quarantine(
+        component,
+        installationId,
+        crypto.randomUUID(),
+        "replace",
+        signal,
+      ),
+      restoreOnFailure: inspection.state === "healthy",
+    };
+  }
+
+  async #rollbackCleanReplacement(
+    backup: CleanInstallBackup | null,
+    cause: unknown,
+    signal?: AbortSignal,
+  ): Promise<never> {
+    if (backup?.restoreOnFailure === true) {
+      try {
+        await this.#installs.restoreQuarantine(backup.quarantined, signal);
+      } catch (restoreCause) {
+        throw new AggregateError(
+          [cause, restoreCause],
+          "Clean rebuild failed and prior installation could not be restored",
+        );
+      }
+    }
+    throw cause;
+  }
+
+  async #discardCleanReplacement(
+    backup: CleanInstallBackup | null,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (backup !== null) {
+      await this.#installs.discardQuarantine(backup.quarantined, signal);
+    }
+  }
+
   async #getProfile(profileId: string, scopeRoot: string): Promise<StoredToolchainProfile> {
     try {
       return await this.#profiles.get(profileId);
@@ -2901,6 +3008,20 @@ export class ZigManager {
       if (errorCode(cause)?.startsWith("INSTALL_") === true) {
         const installationId = errorDetail(cause, "installationId") ?? "unknown";
         throw new ZigInstallCorruptError(installationId, errorMessage(cause), { cause });
+      }
+      throw cause;
+    }
+  }
+
+  async #selectProfile(profileId: string, scopeRoot: string): Promise<StoredToolchainProfile> {
+    try {
+      return await this.#profiles.select(profileId);
+    } catch (cause) {
+      if (errorCode(cause) === "PROFILE_NOT_FOUND") {
+        throw new ZigProfileNotFoundError(profileId, scopeRoot, { cause });
+      }
+      if (errorCode(cause)?.startsWith("PROFILE_") === true) {
+        throw new ZigProfileInvalidError(profileId, errorMessage(cause), { cause });
       }
       throw cause;
     }
@@ -2957,7 +3078,7 @@ export class ZigManager {
     operationId: string,
   ): Promise<{ readonly selection: InstalledZigSelection; readonly rebuilt: boolean }> {
     const inspection = await this.#installs.inspect("zig", installationId);
-    if (inspection.state === "healthy") {
+    if (options.clean !== true && inspection.state === "healthy") {
       try {
         const installed = await reuseInstalledZig({
           recipe: inspection.installed.manifest.identity,
@@ -3003,7 +3124,7 @@ export class ZigManager {
     operationId: string,
   ): Promise<{ readonly selection: InstalledZlsSelection; readonly rebuilt: boolean }> {
     const inspection = await this.#installs.inspect("zls", installationId);
-    if (inspection.state === "healthy") {
+    if (options.clean !== true && inspection.state === "healthy") {
       try {
         if (!isZlsBuildRecipe(inspection.installed.manifest.identity)) {
           throw new Error("stored ZLS identity is not a source-build recipe");
@@ -3804,15 +3925,17 @@ function useResultFromStored(
   pin: { readonly scopeRoot: string | null; readonly pinPath: string },
   activationRequired: boolean,
   origin: "local" | "global",
+  requestedSelector: string = stored.profile.source.requestedSelector,
+  reused = true,
 ): ZigUseResult {
   const zig: ZigManagedComponentResult = {
     component: "zig",
-    selector: stored.profile.source.requestedSelector,
+    selector: requestedSelector,
     installationId: stored.profile.components.zig,
     version: stored.profile.source.version,
     commit: stored.profile.source.commit,
     executable: stored.zigPath,
-    reused: true,
+    reused,
   };
   const zls: ZigManagedComponentResult | null = isPairedToolchainProfile(stored.profile) &&
       stored.zlsPath !== null
@@ -3823,7 +3946,7 @@ function useResultFromStored(
       version: stored.profile.zlsSource.version,
       commit: stored.profile.zlsSource.commit,
       executable: stored.zlsPath,
-      reused: true,
+      reused,
     }
     : null;
   return {

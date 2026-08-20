@@ -27,8 +27,10 @@ offline tests.
   paired profile without selecting it.
 - `use(selector, options?)` first reuses the newest matching installed pair without source work,
   then performs the paired install on a cache miss and atomically selects the profile locally or
-  with `{ global: true }`. Explicit build options bypass local-first reuse. `{ refreshZls: true }`
-  forces stable-ZLS discovery.
+  with `{ global: true }`. Reuse trusts immutable profile metadata by default; `{ verify: true }`
+  performs full installation verification before selection. `{ clean: true }` replaces exact Zig/ZLS
+  build and installation outputs from stored source metadata. Explicit build options bypass
+  local-first reuse. `{ refreshZls: true }` forces stable-ZLS discovery.
 - `useInstalled(id, options?)` selects an existing paired profile or Zig installation without any
   remote or source operations. A ZLS installation ID cannot define a selection. Strict schema-v1
   profiles remain readable.
@@ -38,9 +40,10 @@ offline tests.
   removed while an exact ZLS dependency or retained profile references it. Removing an otherwise
   unreferenced pinned ZLS clears its stable-ZLS pin first.
 
-`UseOptions.profile` configures the Zig CMake build. `jobs` is forwarded to both builds. ZLS uses
-its canonical release-safe profile unless a lower-level recipe API explicitly chooses another
-profile.
+`UseOptions.verify` opts into full verification of a reused profile. `clean` forces an exact Zig/ZLS
+rebuild while preserving a healthy prior installation if rebuilding fails. `profile` configures the
+Zig CMake build. `jobs` is forwarded to both builds. ZLS uses its canonical release-safe profile
+unless a lower-level recipe API explicitly chooses another profile.
 
 The first stable use discovers the highest compatible ZLS tag and records a manager-wide stable-ZLS
 pin for the exact Zig installation. Later stable uses select the newest matching installed profile
